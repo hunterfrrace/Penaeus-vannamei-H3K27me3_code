@@ -1,0 +1,310 @@
+###############################################################################
+## PANEL B — REFERENCE-POINT TSS MODE
+##
+## This panel uses one reference point
+##   -10000 bp to +10000 bp around TSS
+##
+## Therefore
+##   - One dashed vertical line at x = 0
+##   - One central label TSS
+##   - No TES line
+###############################################################################
+
+
+###############################################################################
+## 1. Check required profile object
+###############################################################################
+
+if (!exists(panel_b_data)) {
+    
+    stop(
+        paste(
+            panel_b_data does not exist.,
+            nRun the Panel B matrixprofile calculation first.
+        )
+    )
+}
+
+required_panel_b_columns - c(
+    Position,
+    Mean_Coverage,
+    Lower,
+    Upper,
+    Sample
+)
+
+missing_panel_b_columns - setdiff(
+    required_panel_b_columns,
+    names(panel_b_data)
+)
+
+if (length(missing_panel_b_columns)  0L) {
+    
+    stop(
+        paste(
+            panel_b_data is missing required columns,
+            paste(
+                missing_panel_b_columns,
+                collapse = , 
+            )
+        )
+    )
+}
+
+
+###############################################################################
+## 2. Font setup
+###############################################################################
+
+if (!exists(FONT_FAMILY)) {
+    
+    FONT_FAMILY - Times New Roman
+}
+
+if (!exists(out_dir)) {
+    
+    out_dir - getwd()
+}
+
+
+###############################################################################
+## 3. Panel B colors
+###############################################################################
+
+panel_b_colors - c(
+    k27-I1 = #D98C8C,
+    k27-I2 = #59B77A,
+    k27-I3 = #7FA6D8
+)
+
+panel_b_data$Sample - factor(
+    panel_b_data$Sample,
+    levels = c(
+        k27-I1,
+        k27-I2,
+        k27-I3
+    )
+)
+
+
+###############################################################################
+## 4. Clean reference-point positions
+###############################################################################
+
+panel_b_data - panel_b_data[
+    is.finite(Position) &
+        is.finite(Mean_Coverage) &
+        is.finite(Lower) &
+        is.finite(Upper)
+]
+
+panel_b_data - panel_b_data[
+    Position = -10000 &
+        Position = 10000
+]
+
+
+###############################################################################
+## 5. Build reference-point Panel B
+###############################################################################
+
+p_b_reference_point - ggplot(
+    panel_b_data,
+    aes(
+        x = Position,
+        y = Mean_Coverage,
+        color = Sample,
+        fill = Sample,
+        group = Sample
+    )
+) +
+    
+    geom_ribbon(
+        aes(
+            ymin = Lower,
+            ymax = Upper
+        ),
+        alpha = 0.20,
+        color = NA
+    ) +
+    
+    geom_line(
+        linewidth = 0.8
+    ) +
+    
+    ## One central TSS reference line only.
+    
+    geom_vline(
+        xintercept = 0,
+        linetype = dashed,
+        color = black,
+        linewidth = 0.5
+    ) +
+    
+    facet_grid(
+        Sample ~ .,
+        scales = free_y,
+        switch = y
+    ) +
+    
+    scale_color_manual(
+        values = panel_b_colors,
+        guide = none
+    ) +
+    
+    scale_fill_manual(
+        values = panel_b_colors,
+        guide = none
+    ) +
+    
+    ## Explicit single-reference-point axis.
+    
+    scale_x_continuous(
+        breaks = c(
+            -10000,
+            -5000,
+            0,
+            5000,
+            10000
+        ),
+        labels = c(
+            -10kb,
+            -5kb,
+            TSS,
+            5kb,
+            10kb
+        ),
+        limits = c(
+            -10000,
+            10000
+        ),
+        expand = c(
+            0,
+            0
+        )
+    ) +
+    
+    labs(
+        x = Genomic Region (5'-3'),
+        y = Peak Count Frequency,
+        title = H3K27me3 broad-domain enrichment
+    ) +
+    
+    theme_classic(
+        base_size = 12,
+        base_family = FONT_FAMILY
+    ) +
+    
+    theme(
+        plot.title = element_text(
+            size = 12,
+            face = bold,
+            family = FONT_FAMILY,
+            hjust = 0.5
+        ),
+        axis.title = element_text(
+            size = 12,
+            family = FONT_FAMILY
+        ),
+        axis.text.x = element_text(
+            size = 12,
+            family = FONT_FAMILY,
+            color = black
+        ),
+        axis.text.y = element_text(
+            size = 12,
+            family = FONT_FAMILY,
+            color = black
+        ),
+        panel.border = element_rect(
+            color = black,
+            fill = NA,
+            linewidth = 0.8
+        ),
+        panel.grid.major = element_line(
+            color = grey85,
+            linewidth = 0.30
+        ),
+        panel.grid.minor = element_blank(),
+        strip.placement = outside,
+        strip.background = element_rect(
+            color = black,
+            fill = white,
+            linewidth = 0.8
+        ),
+        strip.text.y.left = element_text(
+            angle = 0,
+            size = 12,
+            face = bold,
+            family = FONT_FAMILY
+        ),
+        panel.spacing.y = gridunit(
+            0.15,
+            lines
+        ),
+        plot.margin = margin(
+            8,
+            8,
+            8,
+            8
+        )
+    )
+
+
+###############################################################################
+## 6. Save reference-point Panel B
+###############################################################################
+
+panel_b_pdf - file.path(
+    out_dir,
+    PanelB_H3K27me3_ReferencePoint_TSS.pdf
+)
+
+panel_b_png - file.path(
+    out_dir,
+    PanelB_H3K27me3_ReferencePoint_TSS.png
+)
+
+panel_b_tiff - file.path(
+    out_dir,
+    PanelB_H3K27me3_ReferencePoint_TSS.tiff
+)
+
+ggsave(
+    filename = panel_b_pdf,
+    plot = p_b_reference_point,
+    width = 7,
+    height = 7,
+    units = in,
+    device = cairo_pdf,
+    bg = white,
+    limitsize = FALSE
+)
+
+ggsave(
+    filename = panel_b_png,
+    plot = p_b_reference_point,
+    width = 7,
+    height = 7,
+    units = in,
+    dpi = 300,
+    bg = white,
+    limitsize = FALSE
+)
+
+ggsave(
+    filename = panel_b_tiff,
+    plot = p_b_reference_point,
+    width = 7,
+    height = 7,
+    units = in,
+    dpi = 300,
+    compression = lzw,
+    device = tiff,
+    bg = white,
+    limitsize = FALSE
+)
+
+print(
+    p_b_reference_point
+)

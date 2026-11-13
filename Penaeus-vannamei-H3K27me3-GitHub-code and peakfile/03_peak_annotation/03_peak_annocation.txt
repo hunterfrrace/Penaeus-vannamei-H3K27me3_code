@@ -1,0 +1,786 @@
+###############################################################################
+# Annotate three K27 broadPeak files plus existing Consensus_3of3.bed
+# Penaeus vannamei
+#
+# No overlap calculation.
+# No consensus calculation.
+# The supplied Consensus_3of3.bed is treated as an independent fourth input.
+###############################################################################
+
+############################
+# 1. Load packages
+############################
+
+suppressPackageStartupMessages({
+    library(data.table)
+    library(dplyr)
+    library(ggplot2)
+    
+    library(ChIPseeker)
+    library(GenomicRanges)
+    library(GenomeInfoDb)
+    library(GenomicFeatures)
+    library(rtracklayer)
+})
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+############################
+# 2. Define paths
+############################
+
+peak_dir <- paste0(
+    "D:/CHIP RESULT CONTROL K4 AND K27/",
+    "ANNOCATION/MACS3_Broad_Results/",
+    "MACS3_Overnight_Results_Rerun2"
+)
+
+consensus_file <- paste0(
+    peak_dir,
+    "/Replicate_Analysis_Broad_H3K27me3/",
+    "Consensus_3of3.bed"
+)
+
+txdb_file <- "D:/genomes/Pvannamei/Pvannamei_TxDb.sqlite"
+
+output_dir <- file.path(
+    peak_dir,
+    "Four_File_Annotation_Output"
+)
+
+dir.create(
+    output_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+dir.create(
+    file.path(output_dir, "annotated_tables"),
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+dir.create(
+    file.path(output_dir, "plots"),
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+dir.create(
+    file.path(output_dir, "normalized_bed"),
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+############################
+# 3. Define exactly four inputs
+############################
+
+peak_files <- c(
+    Rep1 = file.path(
+        peak_dir,
+        "K27_Rep1_Clean_peaks.broadPeak"
+    ),
+    Rep2 = file.path(
+        peak_dir,
+        "K27_Rep2_Clean_peaks.broadPeak"
+    ),
+    Rep3 = file.path(
+        peak_dir,
+        "K27_Rep3_Clean_peaks.broadPeak"
+    ),
+    Consensus_3of3 = consensus_file
+)
+
+print(peak_files)
+
+missing_files <- peak_files[
+    !file.exists(peak_files)
+]
+
+if (length(missing_files) > 0) {
+    stop(
+        "The following input files do not exist:\n",
+        paste(missing_files, collapse = "\n")
+    )
+}
+
+if (!file.exists(txdb_file)) {
+    stop(
+        "TxDb file does not exist:\n",
+        txdb_file
+    )
+}
+
+############################
+# 4. Load TxDb
+############################
+
+message("Loading custom TxDb...")
+
+txdb <- AnnotationDbi::loadDb(
+    file = txdb_file
+)
+
+message("TxDb loaded.")
+print(txdb)
+
+txdb_seqlevels <- GenomeInfoDb::seqlevels(txdb)
+
+message(
+    "Number of TxDb sequence levels: ",
+    length(txdb_seqlevels)
+)
+############################
+# 5. Import peak files
+############################
+
+message("Importing peak files...")
+
+peak_granges <- list()
+
+for (sample_name in names(peak_files)) {
+    
+    current_file <- peak_files[[sample_name]]
+    
+    message(
+        "Reading ",
+        sample_name,
+        ": ",
+        basename(current_file)
+    )
+    
+    current_extension <- tolower(
+        tools::file_ext(current_file)
+    )
+    
+    if (current_extension == "bed") {
+        
+        # Standard BED import.
+        gr <- rtracklayer::import(
+            current_file,
+            format = "BED"
+        )
+        
+    } else if (current_extension == "broadpeak") {
+        
+        # MACS3 broadPeak has:
+        #
+        # 1  chrom
+        # 2  start
+        # 3  end
+        # 4  name
+        # 5  score
+        # 6  strand
+        # 7  signalValue
+        # 8  pValue
+        # 9  qValue
+        #
+        # Columns 7-9 must be declared numeric.
+        gr <- rtracklayer::import(
+            current_file,
+            format = "BED",
+            extraCols = c(
+                signalValue = "numeric",
+                pValue = "numeric",
+                qValue = "numeric"
+            )
+        )
+        
+    } else {
+        
+        stop(
+            "Unsupported file type: ",
+            current_file
+        )
+    }
+    
+    if (!inherits(gr, "GRanges")) {
+        stop(
+            "Imported object is not GRanges for: ",
+            current_file
+        )
+    }
+    
+    if (length(gr) == 0) {
+        stop(
+            "No ranges were imported from: ",
+            current_file
+        )
+    }
+    
+    # Remove unused sequence levels.
+    gr <- GenomeInfoDb::keepSeqlevels(
+        gr,
+        value = GenomeInfoDb::seqlevelsInUse(gr),
+        pruning.mode = "coarse"
+    )
+    
+    # Add a unique sample name.
+    gr$input_sample <- sample_name
+    
+    # Add a unique peak ID.
+    gr$peak_id <- paste0(
+        sample_name,
+        "_peak_",
+        seq_along(gr)
+    )
+    
+    peak_granges[[sample_name]] <- gr
+    
+    message(
+        "  Imported peaks: ",
+        length(gr)
+    )
+    
+    message(
+        "  Chromosomes/scaffolds: ",
+        length(
+            unique(
+                as.character(
+                    GenomicRanges::seqnames(gr)
+                )
+            )
+        )
+    )
+}
+############################
+# 6. Check chromosome matching
+############################
+
+message("Checking chromosome/scaffold names...")
+
+for (sample_name in names(peak_granges)) {
+    
+    peak_seqlevels <- unique(
+        as.character(
+            GenomicRanges::seqnames(
+                peak_granges[[sample_name]]
+            )
+        )
+    )
+    
+    matching_seqlevels <- intersect(
+        peak_seqlevels,
+        txdb_seqlevels
+    )
+    
+    message(
+        sample_name,
+        ": ",
+        length(matching_seqlevels),
+        " matching sequence names"
+    )
+    
+    if (length(matching_seqlevels) == 0) {
+        warning(
+            "No chromosome/scaffold names match between ",
+            sample_name,
+            " and the TxDb.\n",
+            "Peak names include: ",
+            paste(head(peak_seqlevels, 10), collapse = ", "),
+            "\nTxDb names include: ",
+            paste(head(txdb_seqlevels, 10), collapse = ", ")
+        )
+    }
+}
+
+############################
+# 7. Export normalized BED files
+############################
+
+message("Exporting normalized BED files...")
+
+for (sample_name in names(peak_granges)) {
+    
+    output_bed <- file.path(
+        output_dir,
+        "normalized_bed",
+        paste0(
+            sample_name,
+            "_normalized.bed"
+        )
+    )
+    
+    if (file.exists(output_bed)) {
+        file.remove(output_bed)
+    }
+    
+    rtracklayer::export(
+        object = peak_granges[[sample_name]],
+        con = output_bed,
+        format = "BED",
+        append = FALSE,
+        ignore.strand = TRUE
+    )
+    
+    if (!file.exists(output_bed)) {
+        stop(
+            "Could not create normalized BED file: ",
+            output_bed
+        )
+    }
+}
+
+############################
+# 8. Annotate the four files
+############################
+
+annotation_objects <- list()
+annotation_tables <- list()
+
+for (sample_name in names(peak_granges)) {
+    
+    message("--------------------------------------------")
+    message("Annotating: ", sample_name)
+    message("--------------------------------------------")
+    
+    gr <- peak_granges[[sample_name]]
+    
+    annotation_result <- ChIPseeker::annotatePeak(
+        peak = gr,
+        tssRegion = c(-3000, 3000),
+        TxDb = txdb,
+        level = "transcript",
+        assignGenomicAnnotation = TRUE,
+        genomicAnnotationPriority = c(
+            "Promoter",
+            "5UTR",
+            "3UTR",
+            "Exon",
+            "Intron",
+            "Downstream",
+            "Intergenic"
+        ),
+        addFlankGeneInfo = TRUE,
+        flankDistance = 5000,
+        sameStrand = FALSE,
+        ignoreOverlap = FALSE,
+        overlap = "TSS",
+        verbose = TRUE
+    )
+    
+    annotation_objects[[sample_name]] <- annotation_result
+    
+    annotation_df <- as.data.frame(
+        annotation_result
+    )
+    
+    annotation_df$input_sample <- sample_name
+    
+    annotation_tables[[sample_name]] <- annotation_df
+    
+    output_table <- file.path(
+        output_dir,
+        "annotated_tables",
+        paste0(
+            sample_name,
+            "_annotated_peaks.tsv"
+        )
+    )
+    
+    write.table(
+        annotation_df,
+        file = output_table,
+        sep = "\t",
+        quote = FALSE,
+        row.names = FALSE,
+        na = ""
+    )
+    
+    message(
+        "Annotated peaks written: ",
+        output_table
+    )
+}
+
+############################
+# 9. Combine only annotation tables
+############################
+
+# This combines result tables for convenience only.
+# It does not calculate overlap or consensus peaks.
+
+all_annotation_tables <- dplyr::bind_rows(
+    annotation_tables
+)
+
+all_annotation_file <- file.path(
+    output_dir,
+    "annotated_tables",
+    "All_4_peak_files_annotated.tsv"
+)
+
+write.table(
+    all_annotation_tables,
+    file = all_annotation_file,
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE,
+    na = ""
+)
+
+############################
+# 10. Annotation summaries
+############################
+
+summary_list <- list()
+
+for (sample_name in names(annotation_tables)) {
+    
+    annotation_df <- annotation_tables[[sample_name]]
+    
+    if (!"annotation" %in% names(annotation_df)) {
+        warning(
+            "No annotation column found for ",
+            sample_name
+        )
+        next
+    }
+    
+    summary_df <- annotation_df %>%
+        dplyr::count(
+            annotation,
+            sort = TRUE,
+            name = "peak_count"
+        ) %>%
+        dplyr::mutate(
+            percentage = 100 * peak_count / sum(peak_count),
+            sample = sample_name
+        )
+    
+    summary_list[[sample_name]] <- summary_df
+    
+    summary_file <- file.path(
+        output_dir,
+        "annotated_tables",
+        paste0(
+            sample_name,
+            "_annotation_summary.tsv"
+        )
+    )
+    
+    write.table(
+        summary_df,
+        file = summary_file,
+        sep = "\t",
+        quote = FALSE,
+        row.names = FALSE,
+        na = ""
+    )
+}
+
+all_summary <- dplyr::bind_rows(
+    summary_list
+)
+
+write.table(
+    all_summary,
+    file = file.path(
+        output_dir,
+        "annotated_tables",
+        "All_4_annotation_summary.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE,
+    na = ""
+)
+
+############################
+# 11. Individual annotation plots
+############################
+
+message("Creating annotation plots...")
+
+for (sample_name in names(annotation_objects)) {
+    
+    annotation_result <- annotation_objects[[sample_name]]
+    
+    # Pie chart
+    pie_file <- file.path(
+        output_dir,
+        "plots",
+        paste0(
+            sample_name,
+            "_annotation_pie.png"
+        )
+    )
+    
+    png(
+        filename = pie_file,
+        width = 2200,
+        height = 1800,
+        res = 300
+    )
+    
+    print(
+        ChIPseeker::plotAnnoPie(
+            annotation_result
+        )
+    )
+    
+    dev.off()
+    
+    # Distance-to-TSS plot
+    tss_distance_file <- file.path(
+        output_dir,
+        "plots",
+        paste0(
+            sample_name,
+            "_distance_to_TSS.png"
+        )
+    )
+    
+    png(
+        filename = tss_distance_file,
+        width = 2200,
+        height = 1800,
+        res = 300
+    )
+    
+    print(
+        ChIPseeker::plotDistToTSS(
+            annotation_result,
+            title = paste0(
+                sample_name,
+                " distance to TSS"
+            )
+        )
+    )
+    
+    dev.off()
+    
+    # Annotation bar plot
+    bar_file <- file.path(
+        output_dir,
+        "plots",
+        paste0(
+            sample_name,
+            "_annotation_barplot.png"
+        )
+    )
+    
+    png(
+        filename = bar_file,
+        width = 2600,
+        height = 1800,
+        res = 300
+    )
+    
+    print(
+        ChIPseeker::plotAnnoBar(
+            annotation_result,
+            title = paste0(
+                sample_name,
+                " genomic annotation"
+            )
+        )
+    )
+    
+    dev.off()
+}
+
+############################
+# 12. Combined annotation barplot
+############################
+
+if (nrow(all_summary) > 0) {
+    
+    all_summary$annotation <- factor(
+        all_summary$annotation,
+        levels = c(
+            "Promoter",
+            "5' UTR",
+            "3' UTR",
+            "Exon",
+            "Intron",
+            "Downstream",
+            "Intergenic"
+        )
+    )
+    
+    combined_plot <- ggplot(
+        all_summary,
+        aes(
+            x = sample,
+            y = percentage,
+            fill = annotation
+        )
+    ) +
+        geom_col() +
+        theme_bw(base_size = 12) +
+        labs(
+            title = "Genomic annotation of four K27 peak files",
+            x = NULL,
+            y = "Peaks (%)",
+            fill = "Annotation"
+        ) +
+        theme(
+            axis.text.x = element_text(
+                angle = 45,
+                hjust = 1
+            )
+        )
+    
+    ggsave(
+        filename = file.path(
+            output_dir,
+            "plots",
+            "All_4_combined_annotation_barplot.png"
+        ),
+        plot = combined_plot,
+        width = 12,
+        height = 8,
+        units = "in",
+        dpi = 300,
+        bg = "white"
+    )
+}
+
+############################
+# 13. Nearest-gene tables
+############################
+
+extract_gene_ids <- function(annotation_df) {
+    
+    candidate_columns <- c(
+        "geneId",
+        "ENSEMBL",
+        "SYMBOL",
+        "GENENAME"
+    )
+    
+    candidate_columns <- intersect(
+        candidate_columns,
+        names(annotation_df)
+    )
+    
+    if (length(candidate_columns) == 0) {
+        return(character(0))
+    }
+    
+    gene_values <- unique(
+        unlist(
+            lapply(
+                candidate_columns,
+                function(column_name) {
+                    as.character(
+                        annotation_df[[column_name]]
+                    )
+                }
+            ),
+            use.names = FALSE
+        )
+    )
+    
+    gene_values <- gene_values[
+        !is.na(gene_values) &
+            gene_values != "" &
+            gene_values != "NA" &
+            gene_values != "." &
+            gene_values != "0"
+    ]
+    
+    unique(gene_values)
+}
+
+gene_summary <- data.frame(
+    sample = character(),
+    unique_gene_values = integer(),
+    stringsAsFactors = FALSE
+)
+
+for (sample_name in names(annotation_tables)) {
+    
+    annotation_df <- annotation_tables[[sample_name]]
+    
+    gene_values <- extract_gene_ids(
+        annotation_df
+    )
+    
+    gene_file <- file.path(
+        output_dir,
+        "annotated_tables",
+        paste0(
+            sample_name,
+            "_nearest_gene_values.txt"
+        )
+    )
+    
+    writeLines(
+        gene_values,
+        gene_file
+    )
+    
+    gene_summary <- rbind(
+        gene_summary,
+        data.frame(
+            sample = sample_name,
+            unique_gene_values = length(gene_values),
+            stringsAsFactors = FALSE
+        )
+    )
+}
+
+write.table(
+    gene_summary,
+    file = file.path(
+        output_dir,
+        "annotated_tables",
+        "All_4_nearest_gene_summary.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+)
+
+############################
+# 14. Final summary
+############################
+
+final_summary <- data.frame(
+    sample = names(peak_granges),
+    input_file = unname(peak_files),
+    imported_peaks = vapply(
+        peak_granges,
+        length,
+        numeric(1)
+    ),
+    annotated_peaks = vapply(
+        annotation_tables,
+        nrow,
+        numeric(1)
+    ),
+    stringsAsFactors = FALSE
+)
+
+write.table(
+    final_summary,
+    file = file.path(
+        output_dir,
+        "Four_file_annotation_final_summary.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+)
+
+capture.output(
+    sessionInfo(),
+    file = file.path(
+        output_dir,
+        "sessionInfo.txt"
+    )
+)
+
+message("==============================================")
+message("Annotation completed for all four files.")
+message("Overlap analysis: not performed.")
+message("New consensus calculation: not performed.")
+message("Output directory:")
+message(output_dir)
+message("==============================================")
+
+print(final_summary)

@@ -1,0 +1,29 @@
+(base) kaar@hunter4race:/mnt/d/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/MACS3_Broad_Results/MACS3_Overnight_Results_Rerun$ macs3 callpeak   -t "/mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/shrimp_peaks/K27-I3_unique.bam"   -c "/mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521
+626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/00_Rawdata/K27-W3.final.bam"   -f BAMPE   -g
+1800000000   -n "K27_Rep3_Clean"   --broad   --broad-cutoff 0.1   -q 0.05   --keep-dup 1   --outdir "/mnt/d/CHIP
+ RESULT CONTROL K4 AND K27/ANNOCATION/MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2"
+INFO  @ 21 Aug 2026 05:05:07: [37 MB]
+# Command line: callpeak -t /mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/shrimp_peaks/K27-I3_unique.bam -c /mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/00_Rawdata/K27-W3.final.bam -f BAMPE -g 1800000000 -n K27_Rep3_Clean --broad --broad-cutoff 0.1 -q 0.05 --keep-dup 1 --outdir /mnt/d/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2
+# ARGUMENTS LIST:
+# name = K27_Rep3_Clean
+# format = BAMPE
+# ChIP-seq file = ['/mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/shrimp_peaks/K27-I3_unique.bam']
+# control file = ['/mnt/d/CHIP RESULT CONTROL K4 AND K27/N2521626_30-1207159103_A251104055_Delivery_20251105101726/Report/Result/00_Rawdata/K27-W3.final.bam']
+# effective genome size = 1.80e+09
+# band width = 300
+# model fold = [5, 50]
+# qvalue cutoff for narrow/strong regions = 5.00e-02
+# qvalue cutoff for broad/weak regions = 1.00e-01
+# The maximum gap between significant sites is assigned as the read length/tag size.
+# The minimum length of peaks is assigned as the predicted fragment length "d".
+# Larger dataset will be scaled towards smaller dataset.
+# Range for calculating regional lambda is: 1000 bps and 10000 bps
+# Broad region calling is on
+# Paired-End mode is on
+
+INFO  @ 21 Aug 2026 05:05:07: [37 MB] #1 read fragment files...
+INFO  @ 21 Aug 2026 05:05:07: [37 MB] #1 read treatment fragments...
+INFO  @ 21 Aug 2026 05:05:16: [250 MB]  1000000 fragments parsed
+INFO  @ 21 Aug 2026 05:05:24: [431 MB]  2000000 fragments parsed
+INFO  @ 21 Aug 2026 05:05:33: [723 MB]  3000000 fragments parsed
+INFO  @ 21 Aug 2026 05:05:33: [743 MB] 3041297 fragments have be6 lines

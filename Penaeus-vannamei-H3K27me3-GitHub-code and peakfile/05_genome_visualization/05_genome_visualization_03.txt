@@ -1,0 +1,1260 @@
+# =============================================================================
+# FIGURE 3: H3K27me3 BROAD PEAKS — RERUN2 REPLICATES
+#
+# Creates one Figure 3 per filtered replicate:
+#
+# Panel A: Binned H3K27me3 peak density across the 25 scaffolds with the
+#          greatest TOTAL H3K27me3 BROAD-PEAK COVERAGE.
+# Panel B: Broad-peak width distribution.
+# Panel C: MACS3 signalValue distribution.
+#
+# Required R object:
+#   replicate_granges[["Rep1"]] = 28,185 filtered peaks
+#   replicate_granges[["Rep2"]] = 24,973 filtered peaks
+#   replicate_granges[["Rep3"]] = 40,592 filtered peaks
+#
+# Scaffold selection rule for Panel A:
+#   1. Total broad-peak coverage in base pairs, descending
+#   2. Peak count, descending
+#   3. Scaffold observed length, descending
+#
+# Font:
+#   Tick/scaffold/title text = 60 pt Times New Roman
+#   Axis titles = 40 pt Times New Roman
+# =============================================================================
+
+
+# =============================================================================
+# 0. Load packages
+# =============================================================================
+
+library(data.table)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(GenomicRanges)
+library(IRanges)
+library(showtext)
+library(sysfonts)
+
+
+# =============================================================================
+# 1. Global settings
+# =============================================================================
+
+FONT_FAMILY <- "Times"
+# Compact manuscript-style settings
+TICK_FONT_SIZE <- 80
+AXIS_TITLE_SIZE <- 80
+PLOT_TITLE_SIZE <- 80
+STRIP_FONT_SIZE <- 80
+
+
+# Page sizes appropriate for 10 tracks plus two histogram panels.
+PANEL_A_WIDTH_IN <- 24
+PANEL_A_HEIGHT_IN <- 20
+
+COMBINED_WIDTH_IN <- 16
+COMBINED_HEIGHT_IN <- 18
+
+PNG_DPI <- 300L
+
+TRACK_FILL <- "#008080"
+TRACK_BORDER <- "#004D4D"
+BAR_BLUE <- "#0000FF"
+
+TOP_N_SCAFFOLDS <- 15L
+BIN_SIZE_BP <- 100000L
+
+
+
+# =============================================================================
+# 2. Times New Roman font
+# =============================================================================
+
+try(
+    sysfonts::font_add(
+        family = FONT_FAMILY,
+        regular = "times.ttf",
+        bold = "timesbd.ttf",
+        italic = "timesi.ttf",
+        bolditalic = "timesbi.ttf"
+    ),
+    silent = TRUE
+)
+
+showtext::showtext_auto(enable = TRUE)
+
+
+# =============================================================================
+# 3. Confirm peak objects
+# =============================================================================
+
+if (!exists("replicate_granges")) {
+    stop(
+        "Missing object: replicate_granges.\n",
+        "Run the overlap-analysis or peak-loading script first."
+    )
+}
+
+required_replicates <- c("Rep1", "Rep2", "Rep3")
+
+if (!all(required_replicates %in% names(replicate_granges))) {
+    stop(
+        "replicate_granges must contain Rep1, Rep2, and Rep3."
+    )
+}
+
+expected_counts <- c(
+    Rep1 = 28185L,
+    Rep2 = 24973L,
+    Rep3 = 40592L
+)
+
+actual_counts <- vapply(
+    required_replicates,
+    function(sample_id) length(replicate_granges[[sample_id]]),
+    integer(1)
+)
+
+cat("\nPeak counts used for Figure 3:\n")
+print(actual_counts)
+
+if (!all(actual_counts == expected_counts)) {
+    warning(
+        "Current GRanges peak counts differ from the expected filtered values.\n",
+        "The current GRanges objects will still be used."
+    )
+}
+
+
+# =============================================================================
+# 4. Output directory
+# =============================================================================
+
+input_dir <- paste0(
+    "D:/CHIP RESULT CONTROL K4 AND K27/",
+    "ANNOCATION/MACS3_Broad_Results/",
+    "MACS3_Overnight_Results_Rerun2"
+)
+
+out_dir <- file.path(
+    input_dir,
+    "Figure3_Rerun2_Top15_H3K27me3_Coverage"
+)
+
+dir.create(
+    out_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+
+# =============================================================================
+# 5. Base theme for Panels B and C
+# =============================================================================
+
+base_theme <- theme_bw(
+    base_size = TICK_FONT_SIZE,
+    base_family = FONT_FAMILY
+) +
+    theme(
+        text = element_text(
+            family = FONT_FAMILY,
+            color = "black"
+        ),
+        
+        plot.title = element_text(
+            hjust = 0.5,
+            size = PLOT_TITLE_SIZE,
+            face = "bold",
+            family = FONT_FAMILY,
+            color = "black",
+            margin = margin(b = 24)
+        ),
+        
+        axis.title = element_text(
+            size = AXIS_TITLE_SIZE,
+            face = "bold",
+            family = FONT_FAMILY,
+            color = "black"
+        ),
+        
+        axis.text = element_text(
+            size = TICK_FONT_SIZE,
+            family = FONT_FAMILY,
+            color = "black"
+        ),
+        
+        panel.grid.minor = element_blank(),
+        
+        plot.margin = margin(
+            t = 30,
+            r = 25,
+            b = 30,
+            l = 25,
+            unit = "pt"
+        )
+    )
+
+
+# =============================================================================
+# 6. Helper function: fixed-width genomic bins
+# =============================================================================
+
+make_manual_bins <- function(
+        chrom_summary,
+        bin_size = BIN_SIZE_BP
+) {
+    
+    bin_list <- vector(
+        mode = "list",
+        length = nrow(chrom_summary)
+    )
+    
+    for (i in seq_len(nrow(chrom_summary))) {
+        
+        chromosome <- chrom_summary$chrom[i]
+        
+        chromosome_end <- as.integer(
+            ceiling(chrom_summary$max_pos[i])
+        )
+        
+        if (
+            length(chromosome_end) == 0L ||
+            is.na(chromosome_end) ||
+            chromosome_end < 1L
+        ) {
+            next
+        }
+        
+        bin_starts <- seq.int(
+            from = 1L,
+            to = chromosome_end,
+            by = bin_size
+        )
+        
+        bin_ends <- pmin(
+            bin_starts + bin_size - 1L,
+            chromosome_end
+        )
+        
+        bin_list[[i]] <- GRanges(
+            seqnames = chromosome,
+            ranges = IRanges(
+                start = bin_starts,
+                end = bin_ends
+            ),
+            strand = "*"
+        )
+    }
+    
+    bin_list <- bin_list[
+        !vapply(
+            bin_list,
+            is.null,
+            logical(1)
+        )
+    ]
+    
+    if (length(bin_list) == 0L) {
+        stop("No valid genomic bins were created.")
+    }
+    
+    do.call(c, bin_list)
+}
+
+
+# =============================================================================
+# 7. Helper function: extract MACS3 signalValue
+# =============================================================================
+
+extract_enrichment <- function(peaks_gr) {
+    
+    metadata_columns <- colnames(mcols(peaks_gr))
+    
+    preferred_columns <- c(
+        "signalValue",
+        "signalvalue",
+        "fold_enrichment",
+        "foldEnrichment",
+        "enrichment"
+    )
+    
+    preferred_available <- preferred_columns[
+        preferred_columns %in% metadata_columns
+    ]
+    
+    if (length(preferred_available) > 0L) {
+        
+        selected_column <- preferred_available[1]
+        
+    } else {
+        
+        candidate_columns <- grep(
+            "signal|fold|enrich",
+            metadata_columns,
+            ignore.case = TRUE,
+            value = TRUE
+        )
+        
+        if (length(candidate_columns) == 0L) {
+            stop(
+                "Could not identify a MACS3 signalValue/fold-enrichment ",
+                "metadata column."
+            )
+        }
+        
+        selected_column <- candidate_columns[1]
+    }
+    
+    values <- suppressWarnings(
+        as.numeric(mcols(peaks_gr)[[selected_column]])
+    )
+    
+    values <- values[
+        is.finite(values) &
+            values >= 0
+    ]
+    
+    if (length(values) == 0L) {
+        stop("No valid, finite non-negative enrichment values were found.")
+    }
+    
+    list(
+        values = values,
+        column_name = selected_column
+    )
+}
+
+
+# =============================================================================
+# 8. Function: make Figure 3 for one replicate
+# =============================================================================
+
+make_figure3 <- function(
+        peaks_gr,
+        sample_id,
+        top_n_scaffolds = TOP_N_SCAFFOLDS,
+        bin_size = BIN_SIZE_BP
+) {
+    
+    n_peaks <- length(peaks_gr)
+    
+    panel_a_png_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelA_Top15_H3K27me3_Coverage_60pt.png"
+        )
+    )
+    
+    panel_a_pdf_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelA_Top15_H3K27me3_Coverage_60pt.pdf"
+        )
+    )
+    
+    combined_png_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_Panel_ABC_Top15_H3K27me3_Coverage_60pt.png"
+        )
+    )
+    
+    combined_pdf_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_Panel_ABC_Top15_H3K27me3_Coverage_60pt.pdf"
+        )
+    )
+    
+    message(
+        "\n>>> Creating Figure 3 for ",
+        sample_id,
+        " using ",
+        scales::comma(n_peaks),
+        " peaks."
+    )
+    
+    # =========================================================================
+    # Panel A data: rank scaffolds by total broad-peak coverage
+    # =========================================================================
+    
+    metadata_columns <- colnames(mcols(peaks_gr))
+    
+    if ("signalValue" %in% metadata_columns) {
+        peak_signal <- suppressWarnings(
+            as.numeric(peaks_gr$signalValue)
+        )
+    } else {
+        peak_signal <- rep(
+            NA_real_,
+            length(peaks_gr)
+        )
+    }
+    
+    peak_dt <- data.table(
+        chrom = as.character(seqnames(peaks_gr)),
+        start = start(peaks_gr),
+        end = end(peaks_gr),
+        peak_width_bp = as.numeric(width(peaks_gr)),
+        signal_value = peak_signal
+    )
+    
+    # This table contains all scaffolds with at least one filtered peak.
+    scaffold_ranking_all <- peak_dt[
+        ,
+        .(
+            observed_scaffold_length_bp = max(end, na.rm = TRUE),
+            peak_count = .N,
+            total_peak_coverage_bp = sum(
+                peak_width_bp,
+                na.rm = TRUE
+            ),
+            percent_observed_scaffold_covered = round(
+                100 *
+                    sum(peak_width_bp, na.rm = TRUE) /
+                    max(end, na.rm = TRUE),
+                3
+            ),
+            total_signal_value = sum(
+                signal_value,
+                na.rm = TRUE
+            ),
+            median_signal_value = median(
+                signal_value,
+                na.rm = TRUE
+            )
+        ),
+        by = chrom
+    ]
+    
+    scaffold_ranking_all[
+        !is.finite(total_signal_value),
+        total_signal_value := NA_real_
+    ]
+    
+    scaffold_ranking_all[
+        !is.finite(median_signal_value),
+        median_signal_value := NA_real_
+    ]
+    
+    # Transparent selection criteria:
+    # 1. greatest total broad-peak coverage
+    # 2. most called broad peaks
+    # 3. longest observed scaffold coordinate
+    setorder(
+        scaffold_ranking_all,
+        -total_peak_coverage_bp,
+        -peak_count,
+        -observed_scaffold_length_bp,
+        chrom
+    )
+    
+    scaffold_ranking_all[
+        ,
+        Coverage_rank := seq_len(.N)
+    ]
+    
+    scaffold_ranking_selected <- head(
+        scaffold_ranking_all,
+        top_n_scaffolds
+    )
+    
+    if (nrow(scaffold_ranking_selected) == 0L) {
+        stop(
+            "No scaffolds with peaks were available for ",
+            sample_id,
+            "."
+        )
+    }
+    
+    chrom_order <- scaffold_ranking_selected$chrom
+    
+    peaks_selected <- peaks_gr[
+        as.character(seqnames(peaks_gr)) %in% chrom_order
+    ]
+    
+    bins_input <- scaffold_ranking_selected[
+        ,
+        .(
+            chrom = chrom,
+            max_pos = observed_scaffold_length_bp
+        )
+    ]
+    
+    bins_gr <- make_manual_bins(
+        chrom_summary = bins_input,
+        bin_size = bin_size
+    )
+    
+    bins_gr$peak_count <- countOverlaps(
+        query = bins_gr,
+        subject = peaks_selected,
+        ignore.strand = TRUE
+    )
+    
+    binned_data <- data.table(
+        chrom = as.character(seqnames(bins_gr)),
+        start = start(bins_gr),
+        end = end(bins_gr),
+        peak_count = bins_gr$peak_count
+    )
+    
+    binned_data[
+        ,
+        position_mb := (start + end) / 2e6
+    ]
+    
+    # Highest-ranked scaffold appears at top.
+    binned_data[
+        ,
+        chrom := factor(
+            chrom,
+            levels = rev(chrom_order)
+        )
+    ]
+    
+    # =========================================================================
+    # Panel A plot: density tracks
+    # =========================================================================
+    
+    p_a <- ggplot(
+        binned_data,
+        aes(
+            x = position_mb,
+            y = peak_count,
+            group = chrom
+        )
+    ) +
+        geom_area(
+            fill = TRACK_FILL,
+            alpha = 0.68,
+            color = TRACK_BORDER,
+            linewidth = 0.40
+        ) +
+        facet_grid(
+            chrom ~ .,
+            switch = "y",
+            scales = "free_y",
+            space = "free_y",
+            axes = "all_y",
+            axis.labels = "all_y"
+        ) +
+        scale_x_continuous(
+            labels = function(x) {
+                paste0(
+                    formatC(
+                        x,
+                        format = "f",
+                        digits = 1
+                    ),
+                    " Mb"
+                )
+            },
+            expand = expansion(mult = c(0.01, 0.01))
+        ) +
+        scale_y_continuous(
+            n.breaks = 3,
+            expand = expansion(mult = c(0, 0.06))
+        ) +
+        labs(
+            title = paste0(
+                "a  H3K27me3 density on top scaffolds by broad-peak coverage (",
+                sample_id,
+                ")"
+            ),
+            x = "Position on chromosome/scaffold",
+            y = "Peaks per 100 kb"
+        ) +
+        theme_light(
+            base_size = TICK_FONT_SIZE,
+            base_family = FONT_FAMILY
+        ) +
+        theme(
+            text = element_text(
+                family = FONT_FAMILY,
+                color = "black"
+            ),
+            
+            plot.title = element_text(
+                hjust = 0.5,
+                size = PLOT_TITLE_SIZE,
+                face = "bold",
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(b = 28)
+            ),
+            
+            axis.title.x = element_text(
+                size = AXIS_TITLE_SIZE,
+                face = "bold",
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(t = 20)
+            ),
+            
+            axis.title.y = element_text(
+                size = AXIS_TITLE_SIZE,
+                face = "bold",
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(r = 22)
+            ),
+            
+            axis.text.x = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(t = 8)
+            ),
+            
+            axis.text.y = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(r = 3),
+                hjust = 1
+            ),
+            
+            axis.ticks.y = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.y = grid::unit(
+                2,
+                "pt"
+            ),
+            
+            axis.ticks.x = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.x = grid::unit(
+                3,
+                "pt"
+            ),
+            
+            strip.placement = "outside",
+            
+            strip.text.y.left = element_text(
+                angle = 0,
+                size = STRIP_FONT_SIZE,
+                family = FONT_FAMILY,
+                face = "bold",
+                color = "black",
+                margin = margin(
+                    l = 12,
+                    r = 12,
+                    unit = "pt"
+                )
+            ),
+            
+            strip.background.y = element_rect(
+                fill = "#D3D3D3",
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            # A small visible gap between scaffold tracks, without a giant figure height.
+            panel.spacing.y = grid::unit(12, "pt"),
+            
+            panel.grid.major.x = element_line(
+                color = "#D9D9D9",
+                linewidth = 0.40
+            ),
+            
+            panel.grid.major.y = element_line(
+                color = "#EDEDED",
+                linewidth = 0.28
+            ),
+            
+            panel.grid.minor = element_blank(),
+            
+            plot.margin = margin(
+                t = 28,
+                r = 25,
+                b = 26,
+                l = 35,
+                unit = "pt"
+            )
+        )
+    
+    # =========================================================================
+    # Save standalone Panel A
+    # =========================================================================
+    
+    ggsave(
+        filename = panel_a_png_file,
+        plot = p_a,
+        width = PANEL_A_WIDTH_IN,
+        height = PANEL_A_HEIGHT_IN,
+        units = "in",
+        dpi = PNG_DPI,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    ggsave(
+        filename = panel_a_pdf_file,
+        plot = p_a,
+        width = PANEL_A_WIDTH_IN,
+        height = PANEL_A_HEIGHT_IN,
+        units = "in",
+        device = cairo_pdf,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    # =========================================================================
+    # Panel B: broad-peak length distribution
+    # =========================================================================
+    
+    width_data <- data.table(
+        peak_width_bp = as.numeric(width(peaks_gr))
+    )[
+        is.finite(peak_width_bp) &
+            peak_width_bp > 0
+    ]
+    
+    width_upper <- unname(
+        quantile(
+            width_data$peak_width_bp,
+            probs = 0.995,
+            na.rm = TRUE
+        )
+    )
+    
+    p_b <- ggplot(
+        width_data,
+        aes(x = peak_width_bp)
+    ) +
+        geom_histogram(
+            bins = 30,
+            fill = BAR_BLUE,
+            color = "white",
+            linewidth = 0.30
+        ) +
+        coord_cartesian(
+            xlim = c(0, width_upper)
+        ) +
+        scale_x_continuous(
+            labels = scales::comma
+        ) +
+        scale_y_continuous(
+            labels = scales::comma,
+            expand = expansion(mult = c(0, 0.08))
+        ) +
+        labs(
+            title = "b  Peak-length distribution",
+            x = "Peak length (bp)",
+            y = "Number of peaks"
+        ) +
+        base_theme +
+        theme(
+            plot.title = element_text(
+                size = PLOT_TITLE_SIZE,
+                hjust = 0.5,
+                margin = margin(b = 25)
+            ),
+            
+            axis.title.x = element_text(
+                size = AXIS_TITLE_SIZE,
+                margin = margin(t = 18)
+            ),
+            
+            axis.title.y = element_text(
+                size = AXIS_TITLE_SIZE,
+                margin = margin(r = 14)
+            ),
+            
+            axis.text.y = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(r = 3),
+                hjust = 1
+            ),
+            
+            axis.text.x = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(t = 8)
+            ),
+            
+            axis.ticks.y = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.y = grid::unit(
+                2,
+                "pt"
+            ),
+            
+            axis.ticks.x = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.x = grid::unit(
+                3,
+                "pt"
+            ),
+            
+            panel.grid.major.y = element_line(
+                color = "grey85",
+                linewidth = 0.35
+            ),
+            
+            panel.grid.major.x = element_blank(),
+            
+            plot.margin = margin(
+                t = 25,
+                r = 25,
+                b = 30,
+                l = 25,
+                unit = "pt"
+            )
+        )
+    
+    # =========================================================================
+    # Panel C: MACS3 signalValue distribution
+    # =========================================================================
+    
+    signal_object <- extract_enrichment(peaks_gr)
+    
+    signal_data <- data.table(
+        signal_value = signal_object$values
+    )
+    
+    signal_upper <- unname(
+        quantile(
+            signal_data$signal_value,
+            probs = 0.995,
+            na.rm = TRUE
+        )
+    )
+    
+    p_c <- ggplot(
+        signal_data,
+        aes(x = signal_value)
+    ) +
+        geom_histogram(
+            bins = 30,
+            fill = BAR_BLUE,
+            color = "white",
+            linewidth = 0.30
+        ) +
+        coord_cartesian(
+            xlim = c(0, signal_upper)
+        ) +
+        scale_x_continuous(
+            labels = function(x) {
+                formatC(
+                    x,
+                    format = "f",
+                    digits = 1
+                )
+            }
+        ) +
+        scale_y_continuous(
+            labels = scales::comma,
+            expand = expansion(mult = c(0, 0.08))
+        ) +
+        labs(
+            title = "c  MACS3 signalValue distribution",
+            x = paste0(
+                "MACS3 ",
+                signal_object$column_name
+            ),
+            y = "Number of peaks"
+        ) +
+        base_theme +
+        theme(
+            plot.title = element_text(
+                size = PLOT_TITLE_SIZE,
+                hjust = 0.5,
+                margin = margin(b = 25)
+            ),
+            
+            axis.title.x = element_text(
+                size = AXIS_TITLE_SIZE,
+                margin = margin(t = 18)
+            ),
+            
+            axis.title.y = element_text(
+                size = AXIS_TITLE_SIZE,
+                margin = margin(r = 14)
+            ),
+            
+            axis.text.y = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(r = 3),
+                hjust = 1
+            ),
+            
+            axis.text.x = element_text(
+                size = TICK_FONT_SIZE,
+                family = FONT_FAMILY,
+                color = "black",
+                margin = margin(t = 8)
+            ),
+            
+            axis.ticks.y = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.y = grid::unit(
+                2,
+                "pt"
+            ),
+            
+            axis.ticks.x = element_line(
+                color = "black",
+                linewidth = 0.80
+            ),
+            
+            axis.ticks.length.x = grid::unit(
+                3,
+                "pt"
+            ),
+            
+            panel.grid.major.y = element_line(
+                color = "grey85",
+                linewidth = 0.35
+            ),
+            
+            panel.grid.major.x = element_blank(),
+            
+            plot.margin = margin(
+                t = 25,
+                r = 25,
+                b = 30,
+                l = 25,
+                unit = "pt"
+            )
+        )
+    panel_b_png_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelB_Peak_Length_Distribution.png"
+        )
+    )
+    
+    panel_b_pdf_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelB_Peak_Length_Distribution.pdf"
+        )
+    )
+    
+    panel_c_png_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelC_MACS3_SignalValue_Distribution.png"
+        )
+    )
+    
+    panel_c_pdf_file <- file.path(
+        out_dir,
+        paste0(
+            "Figure3_",
+            sample_id,
+            "_PanelC_MACS3_SignalValue_Distribution.pdf"
+        )
+    )
+    # =========================================================================
+    # Combine panels
+    # =========================================================================
+    
+    bottom_row <- p_b + p_c +
+        plot_layout(
+            ncol = 2,
+            widths = c(1, 1)
+        )
+    
+    final_fig <- p_a / bottom_row +
+        plot_layout(
+            heights = c(5.0, 1)
+        )
+    
+    # =========================================================================
+    # Save combined Figure 3
+    # =========================================================================
+    
+    ggsave(
+        filename = combined_png_file,
+        plot = final_fig,
+        width = COMBINED_WIDTH_IN,
+        height = COMBINED_HEIGHT_IN,
+        units = "in",
+        dpi = PNG_DPI,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    ggsave(
+        filename = combined_pdf_file,
+        plot = final_fig,
+        width = COMBINED_WIDTH_IN,
+        height = COMBINED_HEIGHT_IN,
+        units = "in",
+        device = cairo_pdf,
+        bg = "white",
+        limitsize = FALSE
+    )
+    # =========================================================================
+    # Save Panel A separately
+    # =========================================================================
+    
+    ggsave(
+        filename = panel_a_png_file,
+        plot = p_a,
+        width = PANEL_A_WIDTH_IN,
+        height = PANEL_A_HEIGHT_IN,
+        units = "in",
+        dpi = PNG_DPI,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    ggsave(
+        filename = panel_a_pdf_file,
+        plot = p_a,
+        width = PANEL_A_WIDTH_IN,
+        height = PANEL_A_HEIGHT_IN,
+        units = "in",
+        device = cairo_pdf,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    
+    # =========================================================================
+    # Save Panel B separately
+    # =========================================================================
+    
+    ggsave(
+        filename = panel_b_png_file,
+        plot = p_b,
+        width = 10,
+        height = 8,
+        units = "in",
+        dpi = 300,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    ggsave(
+        filename = panel_b_pdf_file,
+        plot = p_b,
+        width = 10,
+        height = 8,
+        units = "in",
+        device = cairo_pdf,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    
+    # =========================================================================
+    # Save Panel C separately
+    # =========================================================================
+    
+    ggsave(
+        filename = panel_c_png_file,
+        plot = p_c,
+        width = 10,
+        height = 8,
+        units = "in",
+        dpi = 300,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    ggsave(
+        filename = panel_c_pdf_file,
+        plot = p_c,
+        width = 10,
+        height = 8,
+        units = "in",
+        device = cairo_pdf,
+        bg = "white",
+        limitsize = FALSE
+    )                                           # =========================================================================
+    # Save underlying data and ranking tables
+    # =========================================================================
+    
+    fwrite(
+        scaffold_ranking_all,
+        file.path(
+            out_dir,
+            paste0(
+                "Figure3_",
+                sample_id,
+                "_PanelA_All_Scaffold_Ranking_By_H3K27me3_Coverage.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        scaffold_ranking_selected,
+        file.path(
+            out_dir,
+            paste0(
+                "Figure3_",
+                sample_id,
+                "_PanelA_Selected_Top25_By_H3K27me3_Coverage.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        binned_data,
+        file.path(
+            out_dir,
+            paste0(
+                "Figure3_",
+                sample_id,
+                "_PanelA_Binned_Density.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        width_data,
+        file.path(
+            out_dir,
+            paste0(
+                "Figure3_",
+                sample_id,
+                "_PanelB_Peak_Widths.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        signal_data,
+        file.path(
+            out_dir,
+            paste0(
+                "Figure3_",
+                sample_id,
+                "_PanelC_MACS3_SignalValues.csv"
+            )
+        )
+    )
+    
+    message("Saved Panel A PDF: ", basename(panel_a_pdf_file))
+    message("Saved combined Figure 3 PDF: ", basename(combined_pdf_file))
+    
+    data.table(
+        Sample = sample_id,
+        Input_peak_count = n_peaks,
+        Total_scaffolds_with_peaks = nrow(scaffold_ranking_all),
+        Scaffolds_shown_in_Panel_A = nrow(scaffold_ranking_selected),
+        Peaks_on_selected_scaffolds = length(peaks_selected),
+        Percent_peaks_on_selected_scaffolds = round(
+            100 * length(peaks_selected) / n_peaks,
+            2
+        ),
+        Panel_B_peak_count = nrow(width_data),
+        Panel_C_signal_value_count = nrow(signal_data),
+        SignalValue_column = signal_object$column_name,
+        Panel_A_PNG = panel_a_png_file,
+        Panel_A_PDF = panel_a_pdf_file,
+        Panel_B_PNG = panel_b_png_file,
+        Panel_B_PDF = panel_b_pdf_file,
+        Panel_C_PNG = panel_c_png_file,
+        Panel_C_PDF = panel_c_pdf_file,
+        Combined_PNG = combined_png_file,
+        Combined_PDF = combined_pdf_file
+    )
+}
+
+
+# =============================================================================
+# 9. Run Figure 3 generation for all replicates
+# =============================================================================
+
+replicate_objects <- list(
+    Rep1 = replicate_granges[["Rep1"]],
+    Rep2 = replicate_granges[["Rep2"]],
+    Rep3 = replicate_granges[["Rep3"]]
+)
+
+production_summary <- rbindlist(
+    lapply(
+        names(replicate_objects),
+        function(sample_id) {
+            make_figure3(
+                peaks_gr = replicate_objects[[sample_id]],
+                sample_id = sample_id,
+                top_n_scaffolds = TOP_N_SCAFFOLDS,
+                bin_size = BIN_SIZE_BP
+            )
+        }
+    ),
+    use.names = TRUE,
+    fill = TRUE
+)
+
+
+# =============================================================================
+# 10. Save QC summary
+# =============================================================================
+
+fwrite(
+    production_summary,
+    file.path(
+        out_dir,
+        "Figure3_Top25_H3K27me3_Coverage_QC_Summary.csv"
+    )
+)
+
+
+# =============================================================================
+# 11. Final output
+# =============================================================================
+
+cat("\n============================================================\n")
+cat("FIGURE 3 COMPLETE FOR Rep1, Rep2, AND Rep3\n")
+cat("Panel A selection: top 25 scaffolds by total H3K27me3 broad-peak coverage\n")
+cat("Panel A bin size: 100 kb\n")
+cat("Tick/scaffold/title font: 60 pt Times\n")
+cat("Axis-title font: 40 pt Times\n")
+cat("============================================================\n\n")
+
+print(production_summary)
+
+cat("\nOutput directory:\n")
+cat(
+    normalizePath(
+        out_dir,
+        winslash = "\\",
+        mustWork = FALSE
+    ),
+    "\n"
+)

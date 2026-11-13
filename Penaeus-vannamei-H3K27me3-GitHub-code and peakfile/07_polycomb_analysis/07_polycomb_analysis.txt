@@ -1,0 +1,242 @@
+# ==============================================================================
+# Tables S16 & S17: H3K27me3 x Polycomb/Chromatin-Modifier Gene Set
+# CORRECTED, ROBUST, REPRODUCIBLE VERSION
+# ==============================================================================
+
+suppressPackageStartupMessages({
+    library(rtracklayer)
+    library(GenomicRanges)
+    library(dplyr)
+    library(data.table)
+})
+
+setDTthreads(1)
+
+# ------------------------------------------------------------------------
+# 0. EXPECTED CONSTANTS & VALIDATION
+# ------------------------------------------------------------------------
+EXPECTED_CONSENSUS_PEAK_N <-      # Canonical 3-way consensus peaks (I1 ∩ I2 ∩ I3)
+EXPECTED_POLYCOMB_SET_N   <-        # Total curated Polycomb/modifier genes
+EXPECTED_BACKGROUND_N     <-     # Total genome background gene count
+
+# ------------------------------------------------------------------------
+# 1. PATH RESOLUTION & SAFE FILE LOOKUP
+# ------------------------------------------------------------------------
+resolve_path <- function(win_path) {
+    if (.Platform$OS.type == "windows") return(win_path)
+    wsl_path <- gsub("^D:", "/mnt/d", win_path, ignore.case = TRUE)
+    wsl_path <- gsub("\\\\", "/", wsl_path)
+    wsl_path
+}
+
+base_dir   <- resolve_path("D:\\CHIP RESULT CONTROL K4 AND K27\\ANNOCATION\\MACS3_Broad_Results\\MACS3_Overnight_Results_Rerun")
+genome_dir <- resolve_path("D:\\genomes\\Pvannamei")
+out_dir    <- file.path(base_dir, "Tables_S16_S17_FINAL")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+gtf_file          <- file.path(genome_dir, "GCF_003789085.1_ASM378908v1_genomic.gtf")
+polycomb_map_file <- resolve_path("D:\\CHIP RESULT CONTROL K4 AND K27\\new result findings\\polycomb_subcomplex_map.csv")
+
+# Dynamic File Finder Helper
+find_file <- function(pattern, target_dir) {
+    found <- list.files(target_dir, pattern = pattern, recursive = TRUE, full.names = TRUE)
+    if (length(found) == 0) {
+        stop(sprintf("ERROR: File pattern '%s' not found under '%s'", pattern, target_dir))
+    }
+    found[1] # Return first exact match
+}
+
+consensus_bed <- find_file("rep1_AND_rep2_AND_rep3\\.bed$", base_dir)
+promoter_bed  <- find_file("K27_promoter_peaks.*\\.bed$", base_dir)
+genebody_bed  <- find_file("K27_gene_body_peaks.*\\.bed$", base_dir)
+
+rep_beds <- list(
+    "K27-I1" = find_file("K27_Rep1_Clean_peaks\\.broadPeak$", base_dir),
+    "K27-I2" = find_file("K27_Rep2_Clean_peaks\\.broadPeak$", base_dir),
+    "K27-I3" = find_file("K27_Rep3_Clean_peaks\\.broadPeak$", base_dir)
+)
+
+# Robust BED loader handling non-standard strand markers and column formats
+import_bed_robust <- function(file_path) {
+    if (!file.exists(file_path)) stop("Missing file: ", file_path)
+    df <- fread(file_path, header = FALSE, select = 1:min(6, ncol(fread(file_path, nrows = 5))), fill = TRUE)
+    if (nrow(df) == 0) return(GRanges())
+    
+    colnames(df)[1:min(6, ncol(df))] <- c("chrom", "start", "end", "name", "score", "strand")[1:min(6, ncol(df))]
+    
+    # 0-based BED to 1-based GRanges conversion
+    df$start <- df$start + 1
+    
+    if ("strand" %in% colnames(df)) {
+        df$strand <- as.character(df$strand)
+        df$strand[!df$strand %in% c("+", "-")] <- "*"
+    } else {
+        df$strand <- "*"
+    }
+    
+    GRanges(seqnames = df$chrom, ranges = IRanges(start = df$start, end = df$end), strand = df$strand)
+}
+
+# ------------------------------------------------------------------------
+# 2. LOAD GENOME ANNOTATION & CLEAN IDS
+# ------------------------------------------------------------------------
+cat("Loading genome annotation from:", gtf_file, "\n")
+stopifnot(file.exists(gtf_file))
+gtf_data <- rtracklayer::import(gtf_file)
+genes_gr <- gtf_data[gtf_data$type == "gene"]
+
+# Handle variable gene ID metadata columns in GTFs safely
+if ("gene_id" %in% colnames(mcols(genes_gr))) {
+    genes_gr$clean_gene_id <- gsub("^LOC", "", as.character(genes_gr$gene_id))
+} else if ("Dbxref" %in% colnames(mcols(genes_gr))) {
+    genes_gr$clean_gene_id <- gsub("^LOC", "", as.character(genes_gr$Dbxref))
+} else {
+    genes_gr$clean_gene_id <- gsub("^LOC", "", as.character(names(genes_gr)))
+}
+
+background_genes <- unique(na.omit(genes_gr$clean_gene_id))
+N <- length(background_genes)
+cat("Background gene universe (N):", N, "\n")
+
+if (N != EXPECTED_BACKGROUND_N) {
+    stop(sprintf("Background gene count (%d) does not match EXPECTED_BACKGROUND_N (%d).", N, EXPECTED_BACKGROUND_N))
+}
+
+promoters_gr <- promoters(genes_gr, upstream = 2000, downstream = 500)
+
+# ------------------------------------------------------------------------
+# 3. LOAD CURATED POLYCOMB SUBCOMPLEX MAP
+# ------------------------------------------------------------------------
+cat("Loading curated Polycomb subcomplex map from:", polycomb_map_file, "\n")
+stopifnot(file.exists(polycomb_map_file))
+poly_map <- read.csv(polycomb_map_file, stringsAsFactors = FALSE)
+
+required_cols <- c("GeneID", "Subcomplex")
+if (!all(required_cols %in% colnames(poly_map))) {
+    stop("polycomb_subcomplex_map.csv must contain columns: GeneID, Subcomplex")
+}
+
+poly_map$GeneID <- gsub("^LOC", "", as.character(poly_map$GeneID))
+valid_subcomplexes <- c("PRC2", "cPRC1", "ncPRC1", "PR-DUB")
+if (!all(poly_map$Subcomplex %in% valid_subcomplexes)) {
+    stop("Subcomplex column contains invalid values. Allowed: PRC2, cPRC1, ncPRC1, PR-DUB")
+}
+
+n_poly_total <- nrow(poly_map)
+cat("Total curated Polycomb/modifier genes:", n_poly_total, "\n")
+if (n_poly_total != EXPECTED_POLYCOMB_SET_N) {
+    warning(sprintf("Curated gene set has %d genes (Expected %d). Proceeding with loaded map.", n_poly_total, EXPECTED_POLYCOMB_SET_N))
+}
+
+polycomb_all_genes <- unique(poly_map$GeneID)
+K_total <- length(intersect(background_genes, polycomb_all_genes))
+cat("Curated Polycomb genes in genome background (K_total):", K_total, "\n")
+
+subcomplex_genes <- split(poly_map$GeneID, poly_map$Subcomplex)
+
+# ------------------------------------------------------------------------
+# 4. PEAK IMPORT & CONSENSUS VALIDATION
+# ------------------------------------------------------------------------
+consensus_check <- import_bed_robust(consensus_bed)
+cat("\nConsensus peak file contains", length(consensus_check), "peaks.\n")
+
+if (length(consensus_check) != EXPECTED_CONSENSUS_PEAK_N) {
+    stop(sprintf("Consensus BED has %d peaks, expected %d.", length(consensus_check), EXPECTED_CONSENSUS_PEAK_N))
+}
+
+import_bed_genes <- function(bed_path, target_gr) {
+    peaks <- import_bed_robust(bed_path)
+    if (length(peaks) == 0) return(list(n_peaks = 0, genes = character(0)))
+    olaps <- findOverlaps(peaks, target_gr)
+    hit_ids <- unique(na.omit(target_gr$clean_gene_id[subjectHits(olaps)]))
+    list(n_peaks = length(peaks), genes = as.character(hit_ids))
+}
+
+# ------------------------------------------------------------------------
+# 5. STATISTICAL ENRICHMENT (SHARED BACKGROUND UNIVERSE)
+# ------------------------------------------------------------------------
+run_enrichment <- function(label, region, fg_genes, gene_set, K_set, N) {
+    n <- length(fg_genes)
+    k <- length(intersect(fg_genes, gene_set))
+    if (n == 0) {
+        gene_ratio <- NA; fold <- NA; raw_p <- NA
+    } else {
+        gene_ratio <- k / n
+        bg_ratio   <- K_set / N
+        fold       <- gene_ratio / bg_ratio
+        raw_p      <- phyper(max(0, k - 1), K_set, N - K_set, n, lower.tail = FALSE)
+    }
+    data.frame(
+        Label = label, Region = region, n = n, k = k, N = N, K = K_set,
+        GeneRatio = round(gene_ratio, 4), BgRatio = round(K_set / N, 6),
+        Fold = round(fold, 3), Raw_p = raw_p, stringsAsFactors = FALSE
+    )
+}
+
+results <- list()
+
+regions <- list(
+    Promoter = list(bed = promoter_bed, target = promoters_gr),
+    GeneBody = list(bed = genebody_bed, target = genes_gr),
+    Combined = list(bed = consensus_bed, target = genes_gr)
+)
+
+combined_region_genes <- list()
+
+for (region_name in names(regions)) {
+    r <- regions[[region_name]]
+    hit <- import_bed_genes(r$bed, r$target)
+    combined_region_genes[[region_name]] <- hit$genes
+    results[[paste0("Combined_", region_name)]] <-
+        run_enrichment(paste0("Combined (", region_name, ")"), region_name,
+                       hit$genes, polycomb_all_genes, K_total, N)
+}
+
+# Subcomplex-level tests using unified Combined gene background
+combined_genes_for_subcomplex <- combined_region_genes[["Combined"]]
+
+for (sub_name in names(subcomplex_genes)) {
+    gene_set <- subcomplex_genes[[sub_name]]
+    K_sub <- length(intersect(background_genes, gene_set))
+    results[[paste0("Subcomplex_", sub_name)]] <-
+        run_enrichment(paste0(sub_name, " subcomplex"), "Combined",
+                       combined_genes_for_subcomplex, gene_set, K_sub, N)
+}
+
+# Per-replicate tests for concordance checks
+for (rep_name in names(rep_beds)) {
+    hit <- import_bed_genes(rep_beds[[rep_name]], genes_gr)
+    results[[paste0("Rep_", rep_name)]] <-
+        run_enrichment(rep_name, "AllPeaks", hit$genes, polycomb_all_genes, K_total, N)
+}
+
+# ------------------------------------------------------------------------
+# 6. UNIFIED BENJAMINI-HOCHBERG ADJUSTMENT & TABLE S16 EXPORT
+# ------------------------------------------------------------------------
+table_s16 <- bind_rows(results)
+table_s16$BH_adjusted_p <- p.adjust(table_s16$Raw_p, method = "BH")
+table_s16$Raw_p_formatted <- formatC(table_s16$Raw_p, format = "e", digits = 3)
+table_s16$BH_adjusted_p_formatted <- formatC(table_s16$BH_adjusted_p, format = "e", digits = 3)
+
+write.csv(table_s16, file.path(out_dir, "Table_S16_Polycomb_Enrichment_FINAL.csv"), row.names = FALSE)
+
+cat("\n=== TABLE S16 SUMMARY ===\n")
+print(table_s16 %>% select(Label, Region, n, k, Fold, BH_adjusted_p_formatted))
+
+# ------------------------------------------------------------------------
+# 7. TABLE S17 PER-GENE ANNOTATION EXPORT
+# ------------------------------------------------------------------------
+table_s17 <- poly_map %>%
+    mutate(
+        InBackground   = GeneID %in% background_genes,
+        Promoter_Peak  = GeneID %in% combined_region_genes[["Promoter"]],
+        GeneBody_Peak  = GeneID %in% combined_region_genes[["GeneBody"]],
+        Combined_Peak  = GeneID %in% combined_region_genes[["Combined"]]
+    )
+
+write.csv(table_s17, file.path(out_dir, "Table_S17_Gene_Level_FINAL.csv"), row.names = FALSE)
+
+cat("\n=== TABLE S17 HEAD ===\n")
+print(head(table_s17, 10))
+
+cat("\nDone! All outputs safely written to:", out_dir, "\n")

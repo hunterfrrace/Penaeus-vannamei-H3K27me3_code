@@ -1,0 +1,1778 @@
+############################################################
+## GO ENRICHMENT: H3K27me3 GENE-ASSOCIATED PEAKS
+##
+## Input directory:
+## MACS3_Overnight_Results_Rerun2/
+## Four_File_Annotation_Output/annotated_tables/
+##
+## Analyses:
+## - K27me3_Rep1_GeneAssociated
+## - K27me3_Rep2_GeneAssociated
+## - K27me3_Rep3_GeneAssociated
+## - K27me3_Consensus_GeneAssociated
+##
+## Foreground:
+## Genes associated with H3K27me3 peaks annotated as:
+## - Promoter, 5' UTR, 3' UTR, Exon, Intron, Downstream
+##
+## Excluded:
+## - Distal Intergenic, Intergenic
+##
+## GO method:
+## topGO classic Fisher test with BH-adjusted p-values
+## BP, MF, and CC
+##
+## Output:
+## All figures: PNG, 600 DPI, Times New Roman, 12pt
+##
+## No KEGG analysis
+############################################################
+
+
+# ============================================================
+# 0. INSTALL AND LOAD PACKAGES
+# ============================================================
+
+cran_pkgs <- c(
+    "data.table",
+    "dplyr",
+    "stringr",
+    "ggplot2",
+    "scales",
+    "cowplot",
+    "showtext",
+    "extrafont"
+)
+
+for (pkg in cran_pkgs) {
+    
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        install.packages(
+            pkg,
+            repos = "https://cloud.r-project.org"
+        )
+    }
+    
+    library(
+        pkg,
+        character.only = TRUE
+    )
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages(
+        "BiocManager",
+        repos = "https://cloud.r-project.org"
+    )
+}
+
+bioc_pkgs <- c(
+    "topGO",
+    "GO.db",
+    "graph",
+    "Rgraphviz"
+)
+
+for (pkg in bioc_pkgs) {
+    
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        BiocManager::install(
+            pkg,
+            ask = FALSE,
+            update = FALSE
+        )
+    }
+    
+    library(
+        pkg,
+        character.only = TRUE
+    )
+}
+
+## Load font family for Times New Roman
+library(showtext)
+library(extrafont)
+
+## Register Times New Roman (adjust path if needed for your system)
+## On Windows, this should work automatically
+font_add(
+    family = "Times",
+    regular = "times.ttf",
+    bold = "timesbd.ttf",
+    italic = "timesi.ttf",
+    bolditalic = "timesbi.ttf"
+)
+
+showtext_auto()
+
+
+# ============================================================
+# 1. PATHS (UPDATED TO RERUN2 DIRECTORY + CONSENSUS)
+# ============================================================
+
+base_dir <- paste0(
+    "D:/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/",
+    "MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2"
+)
+
+annotation_dir <- file.path(
+    base_dir,
+    "Four_File_Annotation_Output/annotated_tables"
+)
+
+out_dir <- file.path(
+    base_dir,
+    "GO_Results_H3K27me3_Consensus_GeneAssociated"
+)
+
+dir.create(
+    out_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+if (!dir.exists(out_dir)) {
+    stop(
+        "Could not create output folder: ",
+        out_dir
+    )
+}
+
+## Use Rep1, Rep2, Rep3, and Consensus files
+k27_files <- c(
+    "K27me3_Rep1" = file.path(
+        annotation_dir,
+        "Rep1_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Rep2" = file.path(
+        annotation_dir,
+        "Rep2_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Rep3" = file.path(
+        annotation_dir,
+        "Rep3_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Consensus" = file.path(
+        annotation_dir,
+        "Consensus_3of3_annotated_peaks.tsv"
+    )
+)
+
+gene2go_file <- file.path(
+    "D:/CHIP RESULT CONTROL K4 AND K27/ANNOCATION",
+    "gene2go_Pvannamei.txt"
+)
+
+required_files <- c(
+    k27_files,
+    gene2go_file
+)
+
+missing_files <- required_files[
+    !file.exists(required_files)
+]
+
+if (length(missing_files) > 0) {
+    stop(
+        paste(
+            "Required file(s) missing:",
+            paste(missing_files, collapse = "\n"),
+            sep = "\n"
+        )
+    )
+}
+
+cat("\n============================================================\n")
+cat("H3K27me3 GENE-ASSOCIATED GO ENRICHMENT\n")
+cat("Analyses: Rep1, Rep2, Rep3, Consensus\n")
+cat("P-value adjustment: Benjamini-Hochberg (FDR)\n")
+cat("Output: PNG, 600 DPI, Times New Roman, 12pt\n")
+cat("============================================================\n")
+
+cat("\nAnnotation input files:\n")
+print(k27_files)
+
+cat("\nGene2GO input file:\n")
+cat(gene2go_file, "\n")
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n")
+
+
+# ============================================================
+# 2. HELPER FUNCTIONS
+# ============================================================
+
+find_column_by_pattern <- function(
+        column_names,
+        patterns
+) {
+    
+    for (pattern in patterns) {
+        
+        hits <- grep(
+            pattern,
+            column_names,
+            ignore.case = TRUE,
+            value = TRUE
+        )
+        
+        if (length(hits) > 0) {
+            return(hits[1])
+        }
+    }
+    
+    return(NULL)
+}
+
+
+extract_ncbi_gene_id <- function(x) {
+    
+    x <- as.character(x)
+    
+    loc_id <- stringr::str_extract(
+        x,
+        "(?<=LOC)[0-9]+"
+    )
+    
+    geneid_id <- stringr::str_extract(
+        x,
+        "(?<=GeneID:)[0-9]+"
+    )
+    
+    numeric_id <- stringr::str_extract(
+        x,
+        "[0-9]+"
+    )
+    
+    gene_id <- ifelse(
+        !is.na(loc_id),
+        loc_id,
+        ifelse(
+            !is.na(geneid_id),
+            geneid_id,
+            numeric_id
+        )
+    )
+    
+    trimws(gene_id)
+}
+
+
+is_intergenic_annotation <- function(x) {
+    
+    x <- tolower(
+        trimws(
+            as.character(x)
+        )
+    )
+    
+    grepl(
+        "distal.*intergenic|intergenic",
+        x,
+        ignore.case = TRUE
+    )
+}
+
+
+is_promoter_annotation <- function(x) {
+    
+    x <- tolower(
+        trimws(
+            as.character(x)
+        )
+    )
+    
+    grepl(
+        "promoter|promoter-tss|tss",
+        x,
+        ignore.case = TRUE
+    )
+}
+
+
+is_gene_associated_annotation <- function(x) {
+    
+    ## Keep promoter, UTR, exon, intron, downstream.
+    ## Exclude all intergenic annotations.
+    !is_intergenic_annotation(x)
+}
+
+
+# ============================================================
+# 3. READ ONE PEAK-ANNOTATION FILE
+# ============================================================
+
+read_full_peak_annotation <- function(filepath) {
+    
+    message("\n============================================================")
+    message("Reading annotation file: ", basename(filepath))
+    message("============================================================")
+    
+    df <- data.table::fread(
+        filepath,
+        fill = TRUE,
+        data.table = FALSE,
+        showProgress = FALSE
+    )
+    
+    if (nrow(df) == 0) {
+        stop(
+            "Annotation file is empty: ",
+            filepath
+        )
+    }
+    
+    colnames(df) <- make.names(
+        colnames(df),
+        unique = TRUE
+    )
+    
+    cat("\nColumns found:\n")
+    print(colnames(df))
+    
+    annotation_col <- find_column_by_pattern(
+        colnames(df),
+        c(
+            "^annotation$",
+            "annotation",
+            "feature",
+            "genomic.*region",
+            "region",
+            "category",
+            "location"
+        )
+    )
+    
+    gene_col <- find_column_by_pattern(
+        colnames(df),
+        c(
+            "entrez",
+            "^geneid$",
+            "gene_id",
+            "geneid",
+            "gene.*id",
+            "nearest.*gene",
+            "gene"
+        )
+    )
+    
+    distance_col <- find_column_by_pattern(
+        colnames(df),
+        c(
+            "distance.*tss",
+            "dist.*tss",
+            "distance"
+        )
+    )
+    
+    cat("\nSelected columns:\n")
+    cat("Annotation column: ", annotation_col, "\n", sep = "")
+    cat("Gene-ID column: ", gene_col, "\n", sep = "")
+    cat("Distance column: ", distance_col, "\n", sep = "")
+    
+    if (is.null(annotation_col)) {
+        stop(
+            "Could not detect genomic annotation column in: ",
+            basename(filepath)
+        )
+    }
+    
+    if (is.null(gene_col)) {
+        stop(
+            "Could not detect gene-ID column in: ",
+            basename(filepath)
+        )
+    }
+    
+    df$annotation_clean <- trimws(
+        as.character(df[[annotation_col]])
+    )
+    
+    df$gene_id_clean <- extract_ncbi_gene_id(
+        df[[gene_col]]
+    )
+    
+    df <- df[
+        !is.na(df$gene_id_clean) &
+            df$gene_id_clean != "",
+        ,
+        drop = FALSE
+    ]
+    
+    if (nrow(df) == 0) {
+        stop(
+            "No usable gene IDs extracted from: ",
+            basename(filepath)
+        )
+    }
+    
+    df$intergenic_flag <- is_intergenic_annotation(
+        df$annotation_clean
+    )
+    
+    df$gene_associated_flag <- is_gene_associated_annotation(
+        df$annotation_clean
+    )
+    
+    df$promoter_flag <- is_promoter_annotation(
+        df$annotation_clean
+    )
+    
+    ## Promoter/TSS fallback if no literal promoter annotation exists.
+    if (
+        sum(df$promoter_flag, na.rm = TRUE) == 0 &&
+        !is.null(distance_col)
+    ) {
+        
+        tss_distance <- suppressWarnings(
+            as.numeric(df[[distance_col]])
+        )
+        
+        df$promoter_flag <- !is.na(tss_distance) &
+            abs(tss_distance) <= 3000
+        
+        message(
+            "No promoter label detected. ",
+            "Using distance-to-TSS <= 3,000 bp."
+        )
+    }
+    
+    all_peak_associated_genes <- unique(
+        as.character(df$gene_id_clean)
+    )
+    
+    gene_associated_genes <- unique(
+        as.character(
+            df$gene_id_clean[
+                df$gene_associated_flag
+            ]
+        )
+    )
+    
+    promoter_genes <- unique(
+        as.character(
+            df$gene_id_clean[
+                df$promoter_flag
+            ]
+        )
+    )
+    
+    intergenic_genes <- unique(
+        as.character(
+            df$gene_id_clean[
+                df$intergenic_flag
+            ]
+        )
+    )
+    
+    annotation_counts <- as.data.frame(
+        sort(
+            table(df$annotation_clean),
+            decreasing = TRUE
+        )
+    )
+    
+    colnames(annotation_counts) <- c(
+        "Annotation",
+        "Peak_rows_with_gene_ID"
+    )
+    
+    message("Peak rows with usable gene IDs: ", nrow(df))
+    message("Unique genes from all peaks: ", length(all_peak_associated_genes))
+    message("Unique genes from gene-associated peaks: ", length(gene_associated_genes))
+    message("Unique genes from promoter/TSS peaks: ", length(promoter_genes))
+    message("Unique genes from intergenic peaks: ", length(intergenic_genes))
+    
+    return(
+        list(
+            all = all_peak_associated_genes,
+            gene_associated = gene_associated_genes,
+            promoter = promoter_genes,
+            intergenic = intergenic_genes,
+            data = df,
+            annotation_counts = annotation_counts,
+            annotation_column = annotation_col,
+            gene_column = gene_col,
+            distance_column = distance_col
+        )
+    )
+}
+
+
+# ============================================================
+# 4. READ H3K27me3 REPLICATE ANNOTATION FILES
+# ============================================================
+
+message("\n=== Reading H3K27me3 peak annotations ===")
+
+k27_data <- lapply(
+    k27_files,
+    read_full_peak_annotation
+)
+
+names(k27_data) <- names(k27_files)
+
+
+# ============================================================
+# 5. CREATE BACKGROUND AND SAVE INPUT DIAGNOSTICS
+# ============================================================
+
+## GO background before GO annotation filtering:
+## Union of all genes from any H3K27me3-associated peak.
+background_all <- unique(
+    unlist(
+        lapply(
+            k27_data,
+            `[[`,
+            "all"
+        ),
+        use.names = FALSE
+    )
+)
+
+if (length(background_all) == 0) {
+    stop("Background gene universe is empty.")
+}
+
+message(
+    "\nBackground universe from all H3K27me3 peak-associated genes: ",
+    length(background_all)
+)
+
+for (sample_name in names(k27_data)) {
+    
+    fwrite(
+        as.data.table(
+            k27_data[[sample_name]]$annotation_counts
+        ),
+        file.path(
+            out_dir,
+            paste0(
+                sample_name,
+                "_Annotation_Category_Counts.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        data.table(
+            GeneID = k27_data[[sample_name]]$all
+        ),
+        file.path(
+            out_dir,
+            paste0(
+                sample_name,
+                "_All_Peak_Associated_Genes.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        data.table(
+            GeneID = k27_data[[sample_name]]$gene_associated
+        ),
+        file.path(
+            out_dir,
+            paste0(
+                sample_name,
+                "_Gene_Associated_NonIntergenic_Genes.csv"
+            )
+        )
+    )
+    
+    fwrite(
+        data.table(
+            GeneID = k27_data[[sample_name]]$promoter
+        ),
+        file.path(
+            out_dir,
+            paste0(
+                sample_name,
+                "_Promoter_Associated_Genes.csv"
+            )
+        )
+    )
+}
+
+gene_set_summary <- data.table(
+    Sample = names(k27_data),
+    
+    All_peak_associated_genes = vapply(
+        k27_data,
+        function(x) length(x$all),
+        integer(1)
+    ),
+    
+    Gene_associated_nonintergenic_genes = vapply(
+        k27_data,
+        function(x) length(x$gene_associated),
+        integer(1)
+    ),
+    
+    Promoter_associated_genes = vapply(
+        k27_data,
+        function(x) length(x$promoter),
+        integer(1)
+    ),
+    
+    Intergenic_associated_genes = vapply(
+        k27_data,
+        function(x) length(x$intergenic),
+        integer(1)
+    ),
+    
+    Background_all_peak_associated_genes = length(background_all)
+)
+
+fwrite(
+    gene_set_summary,
+    file.path(
+        out_dir,
+        "K27me3_Gene_Set_Summary.csv"
+    )
+)
+
+cat("\nH3K27me3 gene-set summary:\n")
+print(gene_set_summary)
+
+
+# ============================================================
+# 6. READ gene2GO MAPPING
+# ============================================================
+
+message("\n=== Reading gene2GO mapping ===")
+
+gene2go_lines <- readLines(
+    gene2go_file,
+    warn = FALSE,
+    encoding = "UTF-8"
+)
+
+if (length(gene2go_lines) == 0) {
+    stop("gene2GO file is empty.")
+}
+
+header_index <- grep(
+    "tax_id[[:space:]]+GeneID[[:space:]]+GO_ID",
+    gene2go_lines
+)
+
+if (length(header_index) == 0) {
+    stop(
+        paste(
+            "Could not find NCBI gene2GO header.",
+            "Expected: #tax_id GeneID GO_ID Evidence Qualifier GO_term Category",
+            sep = "\n"
+        )
+    )
+}
+
+header_index <- header_index[1]
+
+g2g_raw <- data.table::fread(
+    gene2go_file,
+    skip = header_index,
+    header = FALSE,
+    sep = "\t",
+    fill = TRUE,
+    quote = "",
+    data.table = FALSE,
+    showProgress = FALSE,
+    encoding = "UTF-8"
+)
+
+standard_g2g_names <- c(
+    "tax_id",
+    "GeneID",
+    "GO_ID",
+    "Evidence",
+    "Qualifier",
+    "GO_term",
+    "Category"
+)
+
+if (ncol(g2g_raw) < 7) {
+    stop(
+        "Parsed gene2GO file has fewer than 7 columns."
+    )
+}
+
+if (ncol(g2g_raw) == 7) {
+    
+    colnames(g2g_raw) <- standard_g2g_names
+    
+} else {
+    
+    colnames(g2g_raw) <- c(
+        standard_g2g_names,
+        paste0(
+            "Extra_column_",
+            seq_len(ncol(g2g_raw) - 7)
+        )
+    )
+}
+
+g2g_raw$GeneID <- trimws(
+    as.character(g2g_raw$GeneID)
+)
+
+g2g_raw$GO_ID <- trimws(
+    as.character(g2g_raw$GO_ID)
+)
+
+g2g_raw$Category <- trimws(
+    as.character(g2g_raw$Category)
+)
+
+g2g_raw <- g2g_raw[
+    !is.na(g2g_raw$GeneID) &
+        g2g_raw$GeneID != "" &
+        !is.na(g2g_raw$GO_ID) &
+        grepl("^GO:", g2g_raw$GO_ID),
+    ,
+    drop = FALSE
+]
+
+g2g_raw$ontology <- dplyr::recode(
+    g2g_raw$Category,
+    "Process" = "BP",
+    "Function" = "MF",
+    "Component" = "CC",
+    .default = NA_character_
+)
+
+g2g_raw <- g2g_raw[
+    !is.na(g2g_raw$ontology),
+    ,
+    drop = FALSE
+]
+
+if (nrow(g2g_raw) == 0) {
+    stop(
+        "No valid BP, MF, or CC annotations remain in gene2GO data."
+    )
+}
+
+g2g_raw <- g2g_raw[
+    order(
+        g2g_raw$GeneID,
+        g2g_raw$GO_ID
+    ),
+    ,
+    drop = FALSE
+]
+
+gene2GO_list <- split(
+    as.character(g2g_raw$GO_ID),
+    as.character(g2g_raw$GeneID)
+)
+
+gene2GO_list <- lapply(
+    gene2GO_list,
+    unique
+)
+
+gene2GO_list <- gene2GO_list[
+    !is.na(names(gene2GO_list)) &
+        names(gene2GO_list) != ""
+]
+
+message("Valid gene2GO rows: ", nrow(g2g_raw))
+message("Genes with GO annotation: ", length(gene2GO_list))
+message("Unique GO terms: ", length(unique(g2g_raw$GO_ID)))
+
+cat("\nGO ontology row counts:\n")
+print(table(g2g_raw$ontology))
+
+fwrite(
+    as.data.table(g2g_raw),
+    file.path(
+        out_dir,
+        "Parsed_gene2GO_Pvannamei.csv"
+    )
+)
+
+
+# ============================================================
+# 7. CREATE GO-READY BACKGROUND
+# ============================================================
+
+background_go <- intersect(
+    background_all,
+    names(gene2GO_list)
+)
+
+if (length(background_go) < 2) {
+    stop(
+        "Too few background genes overlap with gene2GO mapping: ",
+        length(background_go)
+    )
+}
+
+message(
+    "\nGO-ready background genes: ",
+    length(background_go)
+)
+
+fwrite(
+    data.table(
+        GeneID = background_go
+    ),
+    file.path(
+        out_dir,
+        "GO_Background_Genes.csv"
+    )
+)
+
+
+# ============================================================
+# 8. RUN topGO FOR ONE ONTOLOGY (WITH BH ADJUSTMENT)
+# ============================================================
+
+run_topgo_ont <- function(
+        foreground_genes,
+        background_genes,
+        gene2GO,
+        ontology,
+        p_cutoff = 0.05
+) {
+    
+    background_genes <- unique(
+        as.character(background_genes)
+    )
+    
+    foreground_genes <- intersect(
+        unique(as.character(foreground_genes)),
+        background_genes
+    )
+    
+    if (length(foreground_genes) < 2) {
+        message(
+            "  ",
+            ontology,
+            ": fewer than two foreground genes in GO background; skipping."
+        )
+        
+        return(NULL)
+    }
+    
+    gene_vector <- as.integer(
+        background_genes %in% foreground_genes
+    )
+    
+    names(gene_vector) <- background_genes
+    
+    selected_fun <- function(x) {
+        x == 1
+    }
+    
+    suppressMessages(
+        suppressWarnings({
+            
+            go_data <- new(
+                "topGOdata",
+                ontology = ontology,
+                allGenes = gene_vector,
+                geneSel = selected_fun,
+                annot = annFUN.gene2GO,
+                gene2GO = gene2GO,
+                nodeSize = 1
+            )
+        })
+    )
+    
+    fisher_result <- suppressMessages(
+        runTest(
+            go_data,
+            algorithm = "classic",
+            statistic = "fisher"
+        )
+    )
+    
+    n_terms <- length(
+        score(fisher_result)
+    )
+    
+    if (n_terms == 0) {
+        return(NULL)
+    }
+    
+    result_table <- GenTable(
+        go_data,
+        pvalue = fisher_result,
+        orderBy = "pvalue",
+        topNodes = n_terms
+    )
+    
+    ## Convert p-value column to numeric
+    result_table$pvalue <- suppressWarnings(
+        as.numeric(
+            gsub(
+                "^[< ]+",
+                "",
+                as.character(result_table$pvalue)
+            )
+        )
+    )
+    
+    result_table$pvalue[
+        is.na(result_table$pvalue)
+    ] <- 1e-30
+    
+    ## ============================================================
+    ## APPLY BENJAMINI-HOCHBERG (BH) FDR ADJUSTMENT
+    ## ============================================================
+    
+    result_table$pvalue.adj.BH <- p.adjust(
+        result_table$pvalue,
+        method = "BH"
+    )
+    
+    ## Filter by raw p-value cutoff
+    result_table <- result_table[
+        !is.na(result_table$pvalue) &
+            result_table$pvalue < p_cutoff,
+        ,
+        drop = FALSE
+    ]
+    
+    if (nrow(result_table) == 0) {
+        return(NULL)
+    }
+    
+    result_table <- result_table[
+        order(result_table$pvalue),
+        ,
+        drop = FALSE
+    ]
+    
+    colnames(result_table)[
+        colnames(result_table) == "GO.ID"
+    ] <- "GO_ID"
+    
+    colnames(result_table)[
+        colnames(result_table) == "Term"
+    ] <- "GO_term"
+    
+    colnames(result_table)[
+        colnames(result_table) == "Annotated"
+    ] <- "bg_in_term"
+    
+    colnames(result_table)[
+        colnames(result_table) == "Significant"
+    ] <- "fg_in_term"
+    
+    result_table$fg_in_term <- as.integer(
+        result_table$fg_in_term
+    )
+    
+    result_table$bg_in_term <- as.integer(
+        result_table$bg_in_term
+    )
+    
+    result_table$n_fg <- length(foreground_genes)
+    result_table$n_bg <- length(background_genes)
+    
+    result_table$GeneRatio <- result_table$fg_in_term /
+        result_table$n_fg
+    
+    result_table$BgRatio <- result_table$bg_in_term /
+        result_table$n_bg
+    
+    result_table$ontology <- ontology
+    
+    result_table$minus_log10_p <- -log10(
+        result_table$pvalue
+    )
+    
+    result_table$minus_log10_p_adj <- -log10(
+        result_table$pvalue.adj.BH
+    )
+    
+    attr(result_table, "topGOdata") <- go_data
+    attr(result_table, "testResult") <- fisher_result
+    
+    return(result_table)
+}
+
+
+# ============================================================
+# 9. RUN BP, MF, CC
+# ============================================================
+
+run_topgo_all <- function(
+        foreground_genes,
+        background_genes,
+        gene2GO,
+        p_cutoff = 0.05
+) {
+    
+    message("  Running BP...")
+    bp <- run_topgo_ont(
+        foreground_genes = foreground_genes,
+        background_genes = background_genes,
+        gene2GO = gene2GO,
+        ontology = "BP",
+        p_cutoff = p_cutoff
+    )
+    
+    message("  Running MF...")
+    mf <- run_topgo_ont(
+        foreground_genes = foreground_genes,
+        background_genes = background_genes,
+        gene2GO = gene2GO,
+        ontology = "MF",
+        p_cutoff = p_cutoff
+    )
+    
+    message("  Running CC...")
+    cc <- run_topgo_ont(
+        foreground_genes = foreground_genes,
+        background_genes = background_genes,
+        gene2GO = gene2GO,
+        ontology = "CC",
+        p_cutoff = p_cutoff
+    )
+    
+    return(
+        list(
+            BP = bp,
+            MF = mf,
+            CC = cc
+        )
+    )
+}
+# ============================================================
+# 10. GO BAR PLOT (READABLE, PNG, TIMES NEW ROMAN, 12PT)
+# ============================================================
+
+plot_go_bars <- function(
+        go_results,
+        title_label,
+        top_n = 20,
+        out_file = NULL
+) {
+    
+    ontology_order <- c(
+        "BP",
+        "MF",
+        "CC"
+    )
+    
+    ontology_names <- c(
+        "BP" = "Biological Process",
+        "MF" = "Molecular Function",
+        "CC" = "Cellular Component"
+    )
+    
+    ontology_colors <- c(
+        "BP" = "#2980B9",
+        "MF" = "#C0392B",
+        "CC" = "#27AE60"
+    )
+    
+    plot_dt <- rbindlist(
+        lapply(
+            ontology_order,
+            function(ontology) {
+                
+                df <- go_results[[ontology]]
+                
+                if (is.null(df) || nrow(df) == 0) {
+                    return(NULL)
+                }
+                
+                df <- as.data.table(
+                    copy(df)
+                )
+                
+                setorder(
+                    df,
+                    pvalue,
+                    -fg_in_term
+                )
+                
+                df <- head(
+                    df,
+                    top_n
+                )
+                
+                df[
+                    ,
+                    ontology := ontology
+                ]
+                
+                df[
+                    ,
+                    GO_term := stringr::str_trim(GO_term)
+                ]
+                
+                df[
+                    ,
+                    GO_label := paste0(
+                        GO_term,
+                        " [",
+                        GO_ID,
+                        "]"
+                    )
+                ]
+                
+                ## Show BH-adjusted p-value in bar label
+                df[
+                    ,
+                    pvalue_adj_label := formatC(
+                        pvalue.adj.BH,
+                        format = "e",
+                        digits = 2
+                    )
+                ]
+                
+                df[
+                    ,
+                    bar_label := paste0(
+                        "FDR = ",
+                        pvalue_adj_label
+                    )
+                ]
+                
+                return(df)
+            }
+        ),
+        fill = TRUE
+    )
+    
+    if (nrow(plot_dt) == 0) {
+        message(
+            "  No significant GO terms available to plot for: ",
+            title_label
+        )
+        
+        return(invisible(NULL))
+    }
+    
+    plot_dt[
+        ,
+        Ontology_label := ontology_names[ontology]
+    ]
+    
+    plot_dt[
+        ,
+        Ontology_label := factor(
+            Ontology_label,
+            levels = ontology_names[ontology_order]
+        )
+    ]
+    
+    plot_dt[
+        ,
+        GO_label_unique := paste0(
+            GO_label,
+            "___",
+            ontology,
+            "___",
+            seq_len(.N)
+        )
+    ]
+    
+    plot_dt[
+        ,
+        GO_label_unique := factor(
+            GO_label_unique,
+            levels = rev(
+                GO_label_unique[
+                    order(
+                        ontology,
+                        pvalue,
+                        -fg_in_term
+                    )
+                ]
+            )
+        )
+    ]
+    
+    p <- ggplot(
+        plot_dt,
+        aes(
+            x = GO_label_unique,
+            y = fg_in_term,
+            fill = ontology
+        )
+    ) +
+        geom_col(
+            width = 0.75
+        ) +
+        geom_text(
+            aes(label = fg_in_term),
+            hjust = -0.15,
+            size = 5.5,
+            color = "black",
+            family = "Times",
+            fontface = "bold"
+        ) +
+        coord_flip() +
+        facet_grid(
+            Ontology_label ~ .,
+            scales = "free_y",
+            space = "free_y",
+            switch = "y"
+        ) +
+        scale_fill_manual(
+            values = ontology_colors,
+            guide = "none"
+        ) +
+        scale_x_discrete(
+            labels = function(x) {
+                sub(
+                    "___(BP|MF|CC)___[0-9]+$",
+                    "",
+                    x
+                )
+            }
+        ) +
+        scale_y_continuous(
+            expand = expansion(
+                mult = c(0, 0.25)
+            ),
+            breaks = scales::pretty_breaks(n = 6)
+        ) +
+        labs(
+            title = title_label,
+            subtitle = paste0(
+                "H3K27me3 gene-associated peaks | top ",
+                top_n,
+                " terms per ontology | BH-adjusted FDR"
+            ),
+            x = "",
+            y = "Gene Count"
+        ) +
+        theme_bw(
+            base_size = 14
+        ) +
+        theme(
+            plot.title = element_text(
+                hjust = 0.5,
+                face = "bold",
+                size = 16,
+                family = "Times",
+                margin = margin(b = 8)
+            ),
+            plot.subtitle = element_text(
+                hjust = 0.5,
+                size = 13,
+                colour = "grey30",
+                family = "Times",
+                margin = margin(b = 12)
+            ),
+            axis.text.y = element_text(
+                size = 13,
+                family = "Times",
+                color = "black",
+                hjust = 1,
+                margin = margin(r = 3)
+            ),
+            axis.text.x = element_text(
+                size = 13,
+                family = "Times",
+                color = "black"
+            ),
+            axis.title.x = element_text(
+                size = 14,
+                family = "Times",
+                face = "bold",
+                margin = margin(t = 8)
+            ),
+            axis.title.y = element_blank(),
+            strip.background = element_rect(
+                fill = "grey85",
+                colour = "grey50"
+            ),
+            strip.text.y = element_text(
+                face = "bold",
+                size = 14,
+                family = "Times",
+                color = "black",
+                angle = 0
+            ),
+            strip.placement = "outside",
+            strip.clip = "off",
+            panel.grid.major.y = element_line(
+                colour = "grey90",
+                linewidth = 0.3
+            ),
+            panel.grid.major.x = element_line(
+                colour = "grey90",
+                linewidth = 0.3
+            ),
+            panel.grid.minor = element_blank(),
+            panel.border = element_rect(
+                colour = "grey70",
+                linewidth = 0.5
+            ),
+            plot.margin = margin(
+                t = 12,
+                r = 35,
+                b = 8,
+                l = 8
+            ),
+            plot.background = element_rect(
+                fill = "white",
+                colour = NA
+            )
+        )
+    
+    if (!is.null(out_file)) {
+        
+        plot_height <- max(
+            12,
+            min(
+                30,
+                nrow(plot_dt) * 0.55 + 5
+            )
+        )
+        
+        ggsave(
+            filename = out_file,
+            plot = p,
+            width = 18,
+            height = plot_height,
+            units = "in",
+            dpi = 600,
+            bg = "white",
+            limitsize = FALSE
+        )
+        
+        message(
+            "  GO bar plot saved: ",
+            out_file
+        )
+    }
+    
+    invisible(p)
+}
+
+
+# ============================================================
+# 11. GO DAG FUNCTION (PNG, 600 DPI, TIMES NEW ROMAN)
+# ============================================================
+
+plot_go_dag <- function(
+        go_result_df,
+        ontology,
+        label,
+        top_n = 15,
+        out_file
+) {
+    
+    if (is.null(go_result_df) || nrow(go_result_df) == 0) {
+        return(invisible(NULL))
+    }
+    
+    go_data <- attr(
+        go_result_df,
+        "topGOdata"
+    )
+    
+    test_result <- attr(
+        go_result_df,
+        "testResult"
+    )
+    
+    if (is.null(go_data) || is.null(test_result)) {
+        return(invisible(NULL))
+    }
+    
+    n_show <- min(
+        top_n,
+        nrow(go_result_df)
+    )
+    
+    ontology_name <- c(
+        "BP" = "Biological Process",
+        "MF" = "Molecular Function",
+        "CC" = "Cellular Component"
+    )[
+        ontology
+    ]
+    
+    tryCatch(
+        {
+            ## Create PNG instead of PDF
+            png(
+                filename = out_file,
+                width = 24,
+                height = 18,
+                units = "in",
+                res = 600
+            )
+            
+            par(
+                family = "Times",
+                font = 2,
+                ps = 12,
+                mar = c(1, 1, 3, 1)
+            )
+            
+            suppressMessages(
+                showSigOfNodes(
+                    go_data,
+                    score(test_result),
+                    firstSigNodes = n_show,
+                    useInfo = "all"
+                )
+            )
+            
+            mtext(
+                paste0(
+                    label,
+                    " — ",
+                    ontology_name,
+                    " | Top ",
+                    n_show,
+                    " terms | classic Fisher + BH FDR"
+                ),
+                side = 3,
+                line = 0.5,
+                cex = 1.1,
+                font = 2,
+                outer = TRUE,
+                family = "Times"
+            )
+            
+            dev.off()
+            
+            message(
+                "  GO DAG saved: ",
+                out_file
+            )
+        },
+        error = function(e) {
+            
+            try(
+                dev.off(),
+                silent = TRUE
+            )
+            
+            message(
+                "  GO DAG failed for ",
+                label,
+                " / ",
+                ontology,
+                ": ",
+                conditionMessage(e)
+            )
+        }
+    )
+    
+    invisible(NULL)
+}
+
+
+# ============================================================
+# 12. MASTER FUNCTION: RUN ONE GO ANALYSIS (WITH BH)
+# ============================================================
+
+run_and_save_go <- function(
+        foreground_genes,
+        background_genes,
+        gene2GO,
+        label,
+        top_n_bar = 20,
+        top_n_dag = 15,
+        p_cutoff = 0.05
+) {
+    
+    foreground_genes <- intersect(
+        unique(as.character(foreground_genes)),
+        unique(as.character(background_genes))
+    )
+    
+    foreground_go <- intersect(
+        foreground_genes,
+        names(gene2GO)
+    )
+    
+    background_go_current <- intersect(
+        unique(as.character(background_genes)),
+        names(gene2GO)
+    )
+    
+    message("\n════════════════════════════════════════════════════")
+    message("ANALYSIS: ", label)
+    message("Foreground gene-associated genes: ", length(foreground_genes))
+    message("Foreground genes with GO annotation: ", length(foreground_go))
+    message("Background genes with GO annotation: ", length(background_go_current))
+    message("════════════════════════════════════════════════════")
+    
+    if (length(foreground_go) < 2) {
+        
+        warning(
+            "Skipping ",
+            label,
+            ": fewer than two foreground genes have GO annotation."
+        )
+        
+        return(NULL)
+    }
+    
+    fwrite(
+        data.table(
+            GeneID = foreground_go
+        ),
+        file.path(
+            out_dir,
+            paste0(
+                label,
+                "_Foreground_GO_Annotated_Genes.csv"
+            )
+        )
+    )
+    
+    go_results <- run_topgo_all(
+        foreground_genes = foreground_go,
+        background_genes = background_go_current,
+        gene2GO = gene2GO,
+        p_cutoff = p_cutoff
+    )
+    
+    significant_summary <- data.table(
+        Analysis = label,
+        Ontology = c(
+            "BP",
+            "MF",
+            "CC"
+        ),
+        Significant_terms = vapply(
+            go_results,
+            function(x) {
+                if (is.null(x)) {
+                    return(0L)
+                }
+                return(nrow(x))
+            },
+            integer(1)
+        ),
+        Foreground_GO_genes = length(foreground_go),
+        Background_GO_genes = length(background_go_current)
+    )
+    
+    fwrite(
+        significant_summary,
+        file.path(
+            out_dir,
+            paste0(
+                label,
+                "_GO_Significant_Term_Summary.csv"
+            )
+        )
+    )
+    
+    cat("\nSignificant GO-term counts:\n")
+    print(significant_summary)
+    
+    barplot_file <- file.path(
+        out_dir,
+        paste0(
+            label,
+            "_GO_Barplot.png"
+        )
+    )
+    
+    plot_go_bars(
+        go_results = go_results,
+        title_label = label,
+        top_n = top_n_bar,
+        out_file = barplot_file
+    )
+    
+    for (ontology in c("BP", "MF", "CC")) {
+        
+        if (
+            !is.null(go_results[[ontology]]) &&
+            nrow(go_results[[ontology]]) > 0
+        ) {
+            
+            dag_file <- file.path(
+                out_dir,
+                paste0(
+                    label,
+                    "_GO_DAG_",
+                    ontology,
+                    ".png"
+                )
+            )
+            
+            plot_go_dag(
+                go_result_df = go_results[[ontology]],
+                ontology = ontology,
+                label = label,
+                top_n = top_n_dag,
+                out_file = dag_file
+            )
+        }
+    }
+    
+    full_results <- rbindlist(
+        lapply(
+            go_results,
+            function(df) {
+                
+                if (is.null(df) || nrow(df) == 0) {
+                    return(NULL)
+                }
+                
+                output_df <- as.data.table(
+                    copy(df)
+                )
+                
+                attr(output_df, "topGOdata") <- NULL
+                attr(output_df, "testResult") <- NULL
+                
+                return(output_df)
+            }
+        ),
+        fill = TRUE
+    )
+    
+    if (nrow(full_results) > 0) {
+        
+        fwrite(
+            full_results,
+            file.path(
+                out_dir,
+                paste0(
+                    label,
+                    "_GO_Results_All_Ontologies.csv"
+                )
+            )
+        )
+        
+        write.table(
+            full_results,
+            file.path(
+                out_dir,
+                paste0(
+                    label,
+                    "_GO_Results_All_Ontologies.txt"
+                )
+            ),
+            sep = "\t",
+            row.names = FALSE,
+            quote = FALSE
+        )
+    }
+    
+    return(go_results)
+}
+
+
+# ============================================================
+# 13. RUN REPLICATE + CONSENSUS GO ANALYSES
+# ============================================================
+
+all_go_results <- list()
+
+message("\n\n============================================================")
+message("RUNNING H3K27me3 GENE-ASSOCIATED GO ANALYSES")
+message("Rep1, Rep2, Rep3, Consensus")
+message("P-value adjustment: Benjamini-Hochberg (FDR)")
+message("Output: PNG, 600 DPI, Times New Roman, 12pt")
+message("============================================================")
+
+for (sample_name in names(k27_data)) {
+    
+    analysis_label <- paste0(
+        sample_name,
+        "_GeneAssociated"
+    )
+    
+    all_go_results[[analysis_label]] <- run_and_save_go(
+        foreground_genes = k27_data[[sample_name]]$gene_associated,
+        background_genes = background_go,
+        gene2GO = gene2GO_list,
+        label = analysis_label,
+        top_n_bar = 20,
+        top_n_dag = 15,
+        p_cutoff = 0.05
+    )
+}
+
+
+# ============================================================
+# 14. FINAL REPORT
+# ============================================================
+
+analysis_summary <- rbindlist(
+    lapply(
+        names(all_go_results),
+        function(analysis_name) {
+            
+            result <- all_go_results[[analysis_name]]
+            
+            if (is.null(result)) {
+                return(
+                    data.table(
+                        Analysis = analysis_name,
+                        BP_significant_terms = 0L,
+                        MF_significant_terms = 0L,
+                        CC_significant_terms = 0L
+                    )
+                )
+            }
+            
+            return(
+                data.table(
+                    Analysis = analysis_name,
+                    BP_significant_terms = ifelse(
+                        is.null(result$BP),
+                        0L,
+                        nrow(result$BP)
+                    ),
+                    MF_significant_terms = ifelse(
+                        is.null(result$MF),
+                        0L,
+                        nrow(result$MF)
+                    ),
+                    CC_significant_terms = ifelse(
+                        is.null(result$CC),
+                        0L,
+                        nrow(result$CC)
+                    )
+                )
+            )
+        }
+    ),
+    fill = TRUE
+)
+
+fwrite(
+    analysis_summary,
+    file.path(
+        out_dir,
+        "K27me3_Consensus_GO_Analysis_Summary.csv"
+    )
+)
+
+message("\n════════════════════════════════════════════════════")
+message("H3K27me3 GENE-ASSOCIATED GO ENRICHMENT COMPLETE")
+message("Output: PNG, 600 DPI, Times New Roman, 12pt")
+message("════════════════════════════════════════════════════")
+
+cat("\nInput gene-set summary:\n")
+print(gene_set_summary)
+
+cat("\nGO analysis summary:\n")
+print(analysis_summary)
+
+cat("\nOutput folder:\n")
+cat(
+    normalizePath(
+        out_dir,
+        winslash = "\\",
+        mustWork = FALSE
+    ),
+    "\n"
+)

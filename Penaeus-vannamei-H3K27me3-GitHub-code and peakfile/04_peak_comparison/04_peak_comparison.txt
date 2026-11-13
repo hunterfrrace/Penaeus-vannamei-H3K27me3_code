@@ -1,0 +1,1462 @@
+###############################################################################
+## H3K27me3 MACS3 BROAD PEAK REPLICATE OVERLAP ANALYSIS — RERUN2
+##
+## Input:
+##   MACS3_Overnight_Results_Rerun2
+##
+## Method:
+##   1. Read broadPeak files.
+##   2. Extend each peak by +/-3000 bp.
+##   3. Define overlap as >=500 bp between extended regions.
+##   4. Calculate pairwise and three-way genomic overlap.
+##   5. Generate:
+##        - Peak statistics
+##        - Pairwise overlap statistics
+##        - Consensus BED files
+##        - Venn diagram
+##        - ggvenn diagram
+##        - UpSet plot
+##        - Exact combination-membership table
+##
+## Important:
+##   Peak names are not used to define overlap because names are unique to
+##   each replicate. Genomic coordinates define overlap.
+###############################################################################
+
+
+###############################################################################
+## 0. Packages
+###############################################################################
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    
+    install.packages(
+        "BiocManager",
+        repos = "https://cloud.r-project.org"
+    )
+}
+
+cran_packages <- c(
+    "data.table",
+    "ggplot2",
+    "VennDiagram",
+    "grid",
+    "ggvenn",
+    "UpSetR"
+)
+
+bioc_packages <- c(
+    "GenomicRanges",
+    "rtracklayer",
+    "GenomeInfoDb",
+    "IRanges"
+)
+
+for (pkg in cran_packages) {
+    
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        
+        install.packages(
+            pkg,
+            repos = "https://cloud.r-project.org"
+        )
+    }
+}
+
+for (pkg in bioc_packages) {
+    
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        
+        BiocManager::install(
+            pkg,
+            ask = FALSE,
+            update = FALSE
+        )
+    }
+}
+
+suppressPackageStartupMessages({
+    
+    library(data.table)
+    library(ggplot2)
+    library(VennDiagram)
+    library(grid)
+    library(ggvenn)
+    library(UpSetR)
+    library(GenomicRanges)
+    library(rtracklayer)
+    library(GenomeInfoDb)
+    library(IRanges)
+})
+
+
+###############################################################################
+## 1. Input and output directories
+###############################################################################
+
+input_dir <- paste0(
+    "D:/CHIP RESULT CONTROL K4 AND K27/",
+    "ANNOCATION/MACS3_Broad_Results/",
+    "MACS3_Overnight_Results_Rerun2"
+)
+
+output_dir <- file.path(
+    input_dir,
+    "Replicate_Analysis_Broad_H3K27me3"
+)
+
+dir.create(
+    output_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+
+###############################################################################
+## 2. Input files
+###############################################################################
+
+broadpeak_files <- c(
+    
+    Rep1 = file.path(
+        input_dir,
+        "K27_Rep1_Clean_peaks.broadPeak"
+    ),
+    
+    Rep2 = file.path(
+        input_dir,
+        "K27_Rep2_Clean_peaks.broadPeak"
+    ),
+    
+    Rep3 = file.path(
+        input_dir,
+        "K27_Rep3_Clean_peaks.broadPeak"
+    )
+)
+
+gappedpeak_files <- c(
+    
+    Rep1 = file.path(
+        input_dir,
+        "K27_Rep1_Clean_peaks.gappedPeak"
+    ),
+    
+    Rep2 = file.path(
+        input_dir,
+        "K27_Rep2_Clean_peaks.gappedPeak"
+    ),
+    
+    Rep3 = file.path(
+        input_dir,
+        "K27_Rep3_Clean_peaks.gappedPeak"
+    )
+)
+
+xls_files <- c(
+    
+    Rep1 = file.path(
+        input_dir,
+        "K27_Rep1_Clean_peaks.xls"
+    ),
+    
+    Rep2 = file.path(
+        input_dir,
+        "K27_Rep2_Clean_peaks.xls"
+    ),
+    
+    Rep3 = file.path(
+        input_dir,
+        "K27_Rep3_Clean_peaks.xls"
+    )
+)
+
+input_check <- data.table(
+    
+    File_Type = c(
+        rep(
+            "broadPeak",
+            length(broadpeak_files)
+        ),
+        rep(
+            "gappedPeak",
+            length(gappedpeak_files)
+        ),
+        rep(
+            "XLS",
+            length(xls_files)
+        )
+    ),
+    
+    Replicate = rep(
+        names(broadpeak_files),
+        times = 3
+    ),
+    
+    Path = c(
+        unname(broadpeak_files),
+        unname(gappedpeak_files),
+        unname(xls_files)
+    )
+)
+
+input_check[
+    ,
+    Exists := file.exists(Path)
+]
+
+write.csv(
+    input_check,
+    file.path(
+        output_dir,
+        "Input_File_Check.csv"
+    ),
+    row.names = FALSE
+)
+
+if (any(!input_check$Exists)) {
+    
+    stop(
+        paste(
+            "Missing required files:",
+            paste(
+                input_check[
+                    Exists == FALSE,
+                    Path
+                ],
+                collapse = "\n"
+            )
+        )
+    )
+}
+
+
+###############################################################################
+## 3. Analysis parameters
+###############################################################################
+
+EXTEND_BP <- 3000L
+MIN_OVERLAP_BP <- 500L
+
+sample_levels <- c(
+    "Rep1",
+    "Rep2",
+    "Rep3"
+)
+
+
+###############################################################################
+## 4. Import broadPeak files
+###############################################################################
+
+replicate_granges <- lapply(
+    
+    names(broadpeak_files),
+    
+    function(sample_id) {
+        
+        gr <- rtracklayer::import(
+            broadpeak_files[[sample_id]]
+        )
+        
+        ## Ensure unique replicate-specific IDs.
+        
+        names(gr) <- paste0(
+            sample_id,
+            "_Peak_",
+            seq_along(gr)
+        )
+        
+        ## broadPeak strand values may be "." or "*".
+        ## GRanges accepts only "+", "-", and "*".
+        
+        current_strand <- as.character(
+            strand(gr)
+        )
+        
+        current_strand[
+            is.na(current_strand) |
+                !current_strand %in% c(
+                    "+",
+                    "-"
+                )
+        ] <- "*"
+        
+        strand(gr) <- current_strand
+        
+        gr
+    }
+)
+
+names(replicate_granges) <- names(
+    broadpeak_files
+)
+
+
+###############################################################################
+## 5. Keep common sequence levels
+###############################################################################
+
+common_seqlevels <- Reduce(
+    intersect,
+    lapply(
+        replicate_granges,
+        seqlevels
+    )
+)
+
+if (length(common_seqlevels) == 0L) {
+    
+    stop(
+        "No common chromosome/scaffold names were found across replicates."
+    )
+}
+
+replicate_granges <- lapply(
+    
+    replicate_granges,
+    
+    function(gr) {
+        
+        GenomeInfoDb::keepSeqlevels(
+            gr,
+            common_seqlevels,
+            pruning.mode = "coarse"
+        )
+    }
+)
+
+
+###############################################################################
+## 6. Peak statistics
+###############################################################################
+
+peak_statistics <- rbindlist(
+    
+    lapply(
+        names(replicate_granges),
+        
+        function(sample_id) {
+            
+            gr <- replicate_granges[[sample_id]]
+            
+            data.table(
+                
+                Replicate = sample_id,
+                
+                Peak_Count = length(gr),
+                
+                Mean_width_bp = mean(
+                    width(gr),
+                    na.rm = TRUE
+                ),
+                
+                Median_width_bp = median(
+                    width(gr),
+                    na.rm = TRUE
+                ),
+                
+                Minimum_width_bp = min(
+                    width(gr),
+                    na.rm = TRUE
+                ),
+                
+                Maximum_width_bp = max(
+                    width(gr),
+                    na.rm = TRUE
+                )
+            )
+        }
+    ),
+    
+    use.names = TRUE,
+    fill = TRUE
+)
+
+write.csv(
+    peak_statistics,
+    file.path(
+        output_dir,
+        "Peak_statistics.csv"
+    ),
+    row.names = FALSE
+)
+
+
+###############################################################################
+## 7. Extend peaks
+###############################################################################
+
+extended_replicate_granges <- lapply(
+    
+    replicate_granges,
+    
+    function(gr) {
+        
+        resize(
+            gr,
+            width = width(gr) +
+                2L * EXTEND_BP,
+            fix = "center"
+        )
+    }
+)
+
+names(extended_replicate_granges) <- names(
+    replicate_granges
+)
+
+
+###############################################################################
+## 8. Find genomic overlaps
+###############################################################################
+
+find_overlap_hits <- function(
+        x,
+        y,
+        min_overlap = 500L
+) {
+    
+    hits <- findOverlaps(
+        x,
+        y,
+        ignore.strand = TRUE
+    )
+    
+    if (length(hits) == 0L) {
+        
+        return(
+            data.table(
+                query = integer(0),
+                subject = integer(0),
+                overlap_bp = integer(0)
+            )
+        )
+    }
+    
+    overlap_ranges <- pintersect(
+        x[
+            queryHits(hits)
+        ],
+        y[
+            subjectHits(hits)
+        ]
+    )
+    
+    overlap_widths <- width(
+        overlap_ranges
+    )
+    
+    keep <- overlap_widths >= min_overlap
+    
+    data.table(
+        
+        query = queryHits(hits)[keep],
+        
+        subject = subjectHits(hits)[keep],
+        
+        overlap_bp = overlap_widths[keep]
+    )
+}
+
+
+r1_r2_hits <- find_overlap_hits(
+    extended_replicate_granges[["Rep1"]],
+    extended_replicate_granges[["Rep2"]],
+    min_overlap = MIN_OVERLAP_BP
+)
+
+r1_r3_hits <- find_overlap_hits(
+    extended_replicate_granges[["Rep1"]],
+    extended_replicate_granges[["Rep3"]],
+    min_overlap = MIN_OVERLAP_BP
+)
+
+r2_r3_hits <- find_overlap_hits(
+    extended_replicate_granges[["Rep2"]],
+    extended_replicate_granges[["Rep3"]],
+    min_overlap = MIN_OVERLAP_BP
+)
+
+
+###############################################################################
+## 9. Unique overlap membership
+###############################################################################
+##
+## A peak is considered present in a replicate if it participates in at least
+## one valid >=500-bp overlap with another replicate.
+###############################################################################
+
+rep1_rep2_idx <- unique(
+    r1_r2_hits$query
+)
+
+rep1_rep3_idx <- unique(
+    r1_r3_hits$query
+)
+
+rep2_rep1_idx <- unique(
+    r1_r2_hits$subject
+)
+
+rep2_rep3_idx <- unique(
+    r2_r3_hits$query
+)
+
+rep3_rep1_idx <- unique(
+    r1_r3_hits$subject
+)
+
+rep3_rep2_idx <- unique(
+    r2_r3_hits$subject
+)
+
+rep1_pairwise_idx <- sort(
+    unique(
+        c(
+            rep1_rep2_idx,
+            rep1_rep3_idx
+        )
+    )
+)
+
+rep2_pairwise_idx <- sort(
+    unique(
+        c(
+            rep2_rep1_idx,
+            rep2_rep3_idx
+        )
+    )
+)
+
+rep3_pairwise_idx <- sort(
+    unique(
+        c(
+            rep3_rep1_idx,
+            rep3_rep2_idx
+        )
+    )
+)
+
+
+###############################################################################
+## 10. Three-way consensus
+###############################################################################
+
+## Rep1 peaks participating in Rep2 overlaps.
+## Then test those Rep1 peaks against Rep3.
+
+rep1_rep2_gr <- extended_replicate_granges[["Rep1"]][
+    rep1_rep2_idx
+]
+
+r1_r2_r3_hits <- find_overlap_hits(
+    rep1_rep2_gr,
+    extended_replicate_granges[["Rep3"]],
+    min_overlap = MIN_OVERLAP_BP
+)
+
+three_way_rep1_idx <- rep1_rep2_idx[
+    unique(
+        r1_r2_r3_hits$query
+    )
+]
+
+three_way_rep1 <- replicate_granges[["Rep1"]][
+    three_way_rep1_idx
+]
+
+
+###############################################################################
+## 11. Pairwise consensus region construction
+###############################################################################
+
+merge_two_replicates <- function(
+        gr1,
+        gr2,
+        hits,
+        sample1,
+        sample2
+) {
+    
+    if (nrow(hits) == 0L) {
+        
+        return(
+            GRanges()
+        )
+    }
+    
+    output <- vector(
+        mode = "list",
+        length = nrow(hits)
+    )
+    
+    for (i in seq_len(nrow(hits))) {
+        
+        q <- gr1[
+            hits$query[i]
+        ]
+        
+        s <- gr2[
+            hits$subject[i]
+        ]
+        
+        same_chromosome <- as.character(
+            seqnames(q)
+        ) ==
+            as.character(
+                seqnames(s)
+            )
+        
+        if (!same_chromosome) {
+            next
+        }
+        
+        overlap_start <- max(
+            start(q),
+            start(s)
+        )
+        
+        overlap_end <- min(
+            end(q),
+            end(s)
+        )
+        
+        if (overlap_end < overlap_start) {
+            next
+        }
+        
+        output[[i]] <- GRanges(
+            
+            seqnames = seqnames(q),
+            
+            ranges = IRanges(
+                start = overlap_start,
+                end = overlap_end
+            ),
+            
+            strand = "*"
+        )
+    }
+    
+    output <- output[
+        !vapply(
+            output,
+            is.null,
+            logical(1)
+        )
+    ]
+    
+    if (length(output) == 0L) {
+        return(GRanges())
+    }
+    
+    result <- do.call(
+        c,
+        output
+    )
+    
+    result <- reduce(
+        result,
+        ignore.strand = TRUE
+    )
+    
+    names(result) <- paste0(
+        sample1,
+        "_",
+        sample2,
+        "_Consensus_",
+        seq_along(result)
+    )
+    
+    result
+}
+
+rep1_rep2_consensus <- merge_two_replicates(
+    gr1 = replicate_granges[["Rep1"]],
+    gr2 = replicate_granges[["Rep2"]],
+    hits = r1_r2_hits,
+    sample1 = "Rep1",
+    sample2 = "Rep2"
+)
+
+rep1_rep3_consensus <- merge_two_replicates(
+    gr1 = replicate_granges[["Rep1"]],
+    gr2 = replicate_granges[["Rep3"]],
+    hits = r1_r3_hits,
+    sample1 = "Rep1",
+    sample2 = "Rep3"
+)
+
+rep2_rep3_consensus <- merge_two_replicates(
+    gr1 = replicate_granges[["Rep2"]],
+    gr2 = replicate_granges[["Rep3"]],
+    hits = r2_r3_hits,
+    sample1 = "Rep2",
+    sample2 = "Rep3"
+)
+
+
+###############################################################################
+## 12. Three-way consensus regions
+###############################################################################
+
+three_way_consensus <- three_way_rep1
+
+if (length(three_way_consensus) > 0L) {
+    
+    three_way_consensus <- reduce(
+        three_way_consensus,
+        ignore.strand = TRUE
+    )
+    
+    names(
+        three_way_consensus
+    ) <- paste0(
+        "Consensus_3of3_",
+        seq_along(
+            three_way_consensus
+        )
+    )
+}
+
+
+###############################################################################
+## 13. Export BED files
+###############################################################################
+
+rtracklayer::export(
+    replicate_granges[["Rep1"]],
+    file.path(
+        output_dir,
+        "Rep1_All_broadPeaks.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    replicate_granges[["Rep2"]],
+    file.path(
+        output_dir,
+        "Rep2_All_broadPeaks.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    replicate_granges[["Rep3"]],
+    file.path(
+        output_dir,
+        "Rep3_All_broadPeaks.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    rep1_rep2_consensus,
+    file.path(
+        output_dir,
+        "Rep1_Rep2_Overlap_Consensus.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    rep1_rep3_consensus,
+    file.path(
+        output_dir,
+        "Rep1_Rep3_Overlap_Consensus.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    rep2_rep3_consensus,
+    file.path(
+        output_dir,
+        "Rep2_Rep3_Overlap_Consensus.bed"
+    ),
+    format = "BED"
+)
+
+rtracklayer::export(
+    three_way_consensus,
+    file.path(
+        output_dir,
+        "Consensus_3of3.bed"
+    ),
+    format = "BED"
+)
+
+
+###############################################################################
+## 14. Exact overlap counts
+###############################################################################
+
+AB <- length(
+    unique(
+        r1_r2_hits$query
+    )
+)
+
+AC <- length(
+    unique(
+        r1_r3_hits$query
+    )
+)
+
+BC <- length(
+    unique(
+        r2_r3_hits$query
+    )
+)
+
+ABC <- length(
+    three_way_consensus
+)
+
+
+###############################################################################
+## 15. Exact Venn-style counts
+###############################################################################
+
+only_AB <- max(
+    AB - ABC,
+    0L
+)
+
+only_AC <- max(
+    AC - ABC,
+    0L
+)
+
+only_BC <- max(
+    BC - ABC,
+    0L
+)
+
+only_A <- max(
+    length(
+        replicate_granges[["Rep1"]]
+    ) -
+        AB -
+        AC +
+        ABC,
+    0L
+)
+
+only_B <- max(
+    length(
+        replicate_granges[["Rep2"]]
+    ) -
+        AB -
+        BC +
+        ABC,
+    0L
+)
+
+only_C <- max(
+    length(
+        replicate_granges[["Rep3"]]
+    ) -
+        AC -
+        BC +
+        ABC,
+    0L
+)
+
+venn_table <- data.table(
+    
+    Region = c(
+        "Rep1 only",
+        "Rep2 only",
+        "Rep3 only",
+        "Rep1 + Rep2 only",
+        "Rep1 + Rep3 only",
+        "Rep2 + Rep3 only",
+        "All three"
+    ),
+    
+    Count = c(
+        only_A,
+        only_B,
+        only_C,
+        only_AB,
+        only_AC,
+        only_BC,
+        ABC
+    )
+)
+
+write.csv(
+    venn_table,
+    file.path(
+        output_dir,
+        "Venn_overlap_counts.csv"
+    ),
+    row.names = FALSE
+)
+
+
+###############################################################################
+## 16. Pairwise overlap table
+###############################################################################
+
+pairwise_table <- data.table(
+    
+    Comparison = c(
+        "Rep1 vs Rep2",
+        "Rep1 vs Rep3",
+        "Rep2 vs Rep3"
+    ),
+    
+    Replicate1_Peaks = c(
+        length(
+            replicate_granges[["Rep1"]]
+        ),
+        length(
+            replicate_granges[["Rep1"]]
+        ),
+        length(
+            replicate_granges[["Rep2"]]
+        )
+    ),
+    
+    Replicate2_Peaks = c(
+        length(
+            replicate_granges[["Rep2"]]
+        ),
+        length(
+            replicate_granges[["Rep3"]]
+        ),
+        length(
+            replicate_granges[["Rep3"]]
+        )
+    ),
+    
+    Overlapping_Peaks_in_First = c(
+        AB,
+        AC,
+        BC
+    ),
+    
+    Minimum_Overlap_bp = MIN_OVERLAP_BP,
+    
+    Extension_bp = EXTEND_BP
+)
+
+pairwise_table[
+    ,
+    Percent_of_First_Replicate := 100 *
+        Overlapping_Peaks_in_First /
+        Replicate1_Peaks
+]
+
+write.csv(
+    pairwise_table,
+    file.path(
+        output_dir,
+        "Pairwise_overlap_statistics.csv"
+    ),
+    row.names = FALSE
+)
+
+###############################################################################
+## 17. Build exact combination-membership table — corrected
+###############################################################################
+
+## Create a non-overlapping reference universe from all extended peaks.
+
+all_extended <- c(
+    extended_replicate_granges[["Rep1"]],
+    extended_replicate_granges[["Rep2"]],
+    extended_replicate_granges[["Rep3"]]
+)
+
+union_regions <- reduce(
+    all_extended,
+    ignore.strand = TRUE
+)
+
+if (length(union_regions) == 0L) {
+    
+    stop(
+        "No union regions were created."
+    )
+}
+
+membership_matrix <- data.table(
+    
+    Region_ID = paste0(
+        "Region_",
+        seq_along(
+            union_regions
+        )
+    ),
+    
+    Chromosome = as.character(
+        seqnames(
+            union_regions
+        )
+    ),
+    
+    Start = start(
+        union_regions
+    ),
+    
+    End = end(
+        union_regions
+    )
+)
+
+for (sample_id in sample_levels) {
+    
+    membership_matrix[
+        ,
+        (sample_id) := countOverlaps(
+            union_regions,
+            extended_replicate_granges[[sample_id]],
+            ignore.strand = TRUE
+        ) > 0L
+    ]
+}
+
+## Ensure logical columns exist and contain no NA values.
+
+for (sample_id in sample_levels) {
+    
+    membership_matrix[
+        is.na(
+            get(sample_id)
+        ),
+        (sample_id) := FALSE
+    ]
+}
+
+## Correct combination-label construction.
+##
+## Do not use:
+##   ifelse(condition, "Rep1", NULL)
+##
+## NULL is length zero and causes the replacement error.
+
+membership_matrix[
+    ,
+    Combination := vapply(
+        seq_len(.N),
+        function(i) {
+            
+            members <- character(0)
+            
+            if (isTRUE(Rep1[i])) {
+                members <- c(
+                    members,
+                    "Rep1"
+                )
+            }
+            
+            if (isTRUE(Rep2[i])) {
+                members <- c(
+                    members,
+                    "Rep2"
+                )
+            }
+            
+            if (isTRUE(Rep3[i])) {
+                members <- c(
+                    members,
+                    "Rep3"
+                )
+            }
+            
+            if (length(members) == 0L) {
+                
+                return(
+                    "None"
+                )
+            }
+            
+            paste(
+                members,
+                collapse = "+"
+            )
+        },
+        character(1)
+    )
+]
+
+## Define the number of replicates supporting each union region.
+
+membership_matrix[
+    ,
+    Number_of_replicates := rowSums(
+        .SD
+    ),
+    .SDcols = sample_levels
+]
+
+## Order columns for easier inspection.
+
+setcolorder(
+    membership_matrix,
+    c(
+        "Region_ID",
+        "Chromosome",
+        "Start",
+        "End",
+        "Rep1",
+        "Rep2",
+        "Rep3",
+        "Number_of_replicates",
+        "Combination"
+    )
+)
+
+## Save region-level membership.
+
+write.csv(
+    membership_matrix,
+    file.path(
+        output_dir,
+        "Exact_Genomic_Region_Combination_Membership.csv"
+    ),
+    row.names = FALSE
+)
+
+
+###############################################################################
+## 18. Exact combination counts
+###############################################################################
+
+combination_order <- c(
+    "Rep1",
+    "Rep2",
+    "Rep3",
+    "Rep1+Rep2",
+    "Rep1+Rep3",
+    "Rep2+Rep3",
+    "Rep1+Rep2+Rep3",
+    "None"
+)
+
+combination_counts <- membership_matrix[
+    ,
+    .(
+        Count = .N
+    ),
+    by = Combination
+]
+
+combination_counts <- merge(
+    data.table(
+        Combination = combination_order
+    ),
+    combination_counts,
+    by = "Combination",
+    all.x = TRUE
+)
+
+combination_counts[
+    is.na(Count),
+    Count := 0L
+]
+
+combination_counts[
+    ,
+    Percentage_of_union_regions := 100 *
+        Count /
+        sum(Count)
+]
+
+combination_counts[
+    ,
+    Combination := factor(
+        Combination,
+        levels = combination_order
+    )
+]
+
+setorder(
+    combination_counts,
+    Combination
+)
+
+write.csv(
+    combination_counts,
+    file.path(
+        output_dir,
+        "Exact_Genomic_Region_Combination_Counts.csv"
+    ),
+    row.names = FALSE
+)
+
+cat("\nExact genomic-region combinations:\n")
+print(
+    combination_counts
+)
+
+
+###############################################################################
+## 19. Build UpSet input from exact membership table
+###############################################################################
+
+upset_data <- membership_matrix[
+    ,
+    .(
+        Rep1 = as.integer(
+            Rep1
+        ),
+        Rep2 = as.integer(
+            Rep2
+        ),
+        Rep3 = as.integer(
+            Rep3
+        )
+    )
+]
+
+write.csv(
+    upset_data,
+    file.path(
+        output_dir,
+        "UpSet_Exact_Membership_Matrix.csv"
+    ),
+    row.names = FALSE
+)
+
+###############################################################################
+## 19. ggvenn plot
+###############################################################################
+
+peak_set_list <- list(
+    
+    Rep1 = paste0(
+        "Rep1_",
+        seq_along(
+            replicate_granges[["Rep1"]]
+        )
+    ),
+    
+    Rep2 = paste0(
+        "Rep2_",
+        seq_along(
+            replicate_granges[["Rep2"]]
+        )
+    ),
+    
+    Rep3 = paste0(
+        "Rep3_",
+        seq_along(
+            replicate_granges[["Rep3"]]
+        )
+    )
+)
+
+p_ggvenn <- ggvenn(
+    
+    peak_set_list,
+    
+    fill_color = c(
+        "#0073C2FF",
+        "#EFC000FF",
+        "#868686FF"
+    ),
+    
+    stroke_size = 0.5,
+    
+    set_name_size = 5,
+    
+    text_size = 4.5,
+    
+    show_percentage = TRUE
+) +
+    ggtitle(
+        "H3K27me3 Rerun2 Broad-Peak Replicate Overlap"
+    ) +
+    theme(
+        plot.title = element_text(
+            hjust = 0.5,
+            size = 14,
+            face = "bold"
+        )
+    )
+
+ggsave(
+    filename = file.path(
+        output_dir,
+        "H3K27me3_Rerun2_Clean_Venn.png"
+    ),
+    plot = p_ggvenn,
+    width = 8,
+    height = 7,
+    dpi = 300,
+    bg = "white"
+)
+
+ggsave(
+    filename = file.path(
+        output_dir,
+        "H3K27me3_Rerun2_Clean_Venn.pdf"
+    ),
+    plot = p_ggvenn,
+    width = 8,
+    height = 7,
+    device = cairo_pdf,
+    bg = "white"
+)
+
+
+###############################################################################
+## 20. UpSet plot
+###############################################################################
+
+upset_data <- membership_matrix[
+    ,
+    .(
+        Rep1 = as.integer(
+            Rep1
+        ),
+        Rep2 = as.integer(
+            Rep2
+        ),
+        Rep3 = as.integer(
+            Rep3
+        )
+    )
+]
+
+png(
+    file.path(
+        output_dir,
+        "H3K27me3_Rerun2_UpSet_Plot.png"
+    ),
+    width = 2800,
+    height = 2200,
+    res = 300
+)
+
+UpSetR::upset(
+    
+    as.data.frame(
+        upset_data
+    ),
+    
+    sets = c(
+        "Rep1",
+        "Rep2",
+        "Rep3"
+    ),
+    
+    sets.bar.color = c(
+        "#4C72B0",
+        "#DD8452",
+        "#55A868"
+    ),
+    
+    order.by = "freq",
+    
+    keep.order = TRUE,
+    
+    mainbar.y.label = "Intersection Region Count",
+    
+    sets.x.label = "Total Regions per Replicate",
+    
+    text.scale = c(
+        1.5,
+        1.5,
+        1.2,
+        1.2,
+        1.5,
+        1.5
+    ),
+    
+    point.size = 3.5,
+    
+    line.size = 1.2
+)
+
+dev.off()
+
+
+###############################################################################
+## 21. Final summary
+###############################################################################
+
+final_summary <- data.table(
+    
+    Metric = c(
+        "Rep1 peak count",
+        "Rep2 peak count",
+        "Rep3 peak count",
+        "Rep1-Rep2 overlapping Rep1 peaks",
+        "Rep1-Rep3 overlapping Rep1 peaks",
+        "Rep2-Rep3 overlapping Rep2 peaks",
+        "Three-way consensus regions",
+        "Extension bp",
+        "Minimum overlap bp"
+    ),
+    
+    Value = c(
+        
+        length(
+            replicate_granges[["Rep1"]]
+        ),
+        
+        length(
+            replicate_granges[["Rep2"]]
+        ),
+        
+        length(
+            replicate_granges[["Rep3"]]
+        ),
+        
+        AB,
+        AC,
+        BC,
+        ABC,
+        EXTEND_BP,
+        MIN_OVERLAP_BP
+    )
+)
+
+write.csv(
+    final_summary,
+    file.path(
+        output_dir,
+        "Final_Overlap_Summary.csv"
+    ),
+    row.names = FALSE
+)
+
+cat("\n============================================================\n")
+cat("H3K27me3 RERUN2 BROAD-PEAK OVERLAP ANALYSIS COMPLETE\n")
+cat("============================================================\n\n")
+
+cat("Peak statistics:\n")
+print(
+    peak_statistics
+)
+
+cat("\nPairwise overlap statistics:\n")
+print(
+    pairwise_table
+)
+
+cat("\nVenn-style overlap counts:\n")
+print(
+    venn_table
+)
+
+cat("\nExact union-region combinations:\n")
+print(
+    combination_counts
+)
+
+cat("\nOutput directory:\n")
+cat(
+    normalizePath(
+        output_dir,
+        winslash = "\\",
+        mustWork = FALSE
+    ),
+    "\n"
+)

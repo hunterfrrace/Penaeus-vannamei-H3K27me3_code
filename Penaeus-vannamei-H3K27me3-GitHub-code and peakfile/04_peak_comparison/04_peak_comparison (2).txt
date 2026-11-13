@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# ============================================================
+# COMPLETE BRAND-NEW LIFT-OVER PIPELINE
+# Old assembly -> New assembly
+#
+# Input BED files:
+#   Rep1.prepared.bed
+#   Rep2.prepared.bed
+#   Rep3.prepared.bed
+#   Consensus_3of3.prepared.bed
+#
+# Output:
+#   brand_new_complete_2026-11-14/
+#
+# Run:
+#   bash complete_brand_new_liftover.sh
+# ============================================================
+
+set -euo pipefail
+
+# ------------------------------------------------------------
+# 1. INPUT FILES AND SETTINGS
+# ------------------------------------------------------------
+
+BEDDIR="/mnt/c/Users/Asus-2021/Downloads/BMC 091426/raw files/bed files"
+
+OLD_FA="/mnt/d/genomes/Pvannamei/GCF_003789085.1_ASM378908v1_genomic.fna"
+NEW_FA="/mnt/d/genomes/Pvannamei_2024/GCF_042767895.1_ASM4276789v1_genomic.fna"
+
+THREADS=8
+MINIMAP2_PRESET="asm10"
+RESCUE_MAPQ=20
+
+# New assembly chromosomes: NC_091549.1 to NC_091592.1
+CHROM_REGEX='^NC_0915(49|[5-8][0-9]|9[0-2])\.'
+
+# ------------------------------------------------------------
+# 2. CREATE A CLEAN OUTPUT FOLDER
+# ------------------------------------------------------------
+
+OUT="/mnt/d/liftover_out/brand_new_complete_2026-11-14"
+
+rm -rf "$OUT"
+mkdir -p "$OUT"
+cd "$OUT"
+
+echo "Output folder: $OUT"
+echo "Old assembly: $OLD_FA"
+echo "New assembly: $NEW_FA"
+echo "Minimap2 preset: $MINIMAP2_PRESET"
+
+# ------------------------------------------------------------
+# 3. CHECK REQUIRED INPUT FILES
+# ------------------------------------------------------------
+
+for f in \
+    "$BEDDIR/Rep1.prepared.bed" \
+    "$BEDDIR/Rep2.prepared.bed" \
+    "$BEDDIR/Rep3.prepared.bed" \
+    "$BEDDIR/Consensus_3of3.prepared.bed" \
+    "$OLD_FA" \
+    "$NEW_FA"; do
+    [[ -s "$f" ]] || {
+        echo "ERROR: FILE NOT FOUND OR EMPTY: $f"
+        exit 1
+    }
+done
+
+# ------------------------------------------------------------
+# 4. RECORD SOFTWARE VERSIONS
+# ------------------------------------------------------------
+
+minimap2 --version > minimap2_version.txt 2>&1 || true
+paftools.js 2>&1 | head -5 > paftools_version.txt || true
+bedtools --version > bedtools_version.txt 2>&1 || true
+samtools --version > samtools_version.txt 2>&1 || true
+
+# ------------------------------------------------------------
+# 5. COPY ORIGINAL PEAK BED FILES
+# ------------------------------------------------------------
+
+cp "$BEDDIR/Rep1.prepared.bed" Rep1_old.bed
+cp "$BEDDIR/Rep2.prepared.bed" Rep2_old.bed
+cp "$BEDDIR/Rep3.prepared.bed" Rep3_old.bed
+cp "$BEDDIR/Consensus_3of3.prepared.bed" Consensus_old.bed
+
+# ------------------------------------------------------------
+# 6. NEW WHOLE-GENOME MINIMAP2 ALIGNMENT
+#
+# Target = NEW assembly
+# Query  = OLD assembly
+#
+# This direction is required because the BED coordinates are
+# in the old assembly and must be lifted to the new assembly.
+# ------------------------------------------------------------
+
+echo "Running brand-new whole-genome minimap2 alignment ..."
+
+minimap2 \
+    -cx "$MINIMAP2_PRESET" \
+    -t "$THREADS" \
+    "$NEW_FA" \
+    "$OLD_FA" \
+    > new_target_old_query.paf
+
+echo "Whole-genome alignment complete."
+
+# ------------------------------------------------------------
+# 7. PAF-BASED PRIMARY LIFT-OVER AND SEQUENCE RESCUE
+# ------------------------------------------------------------
+
+for NAME in Rep1 Rep2 Rep3 Consensus; do
+
+    echo "Processing $NAME ..."
+
+    # --------------------------------------------------------
+    # 7a. Primary PAF-based lift-over
+    # --------------------------------------------------------
+
+    paftools.js liftover \
+        -l 0 \
+        -q 0 \
+        new_target_old_query.paf \
+        "${NAME}_old.bed" \
+        > "${NAME}_primary_lifted.bed"
+
+    # --------------------------------------------------------
+    # 7b. Identify peaks already lifted, using old coordinates
+    #
+    # paftools.js renames lifted peaks as:
+    #   oldChrom_oldStart_oldEnd
+    # ------------------------------------------------------------
+
+    awk -F'\t' '
+    {
+        id = $4
+        n = split(id, a, "_")
+        start = a[n-1]
+        end = a[n]
+        chrom = id
+        sub("_" start "_" end "$", "", chrom)
+        print chrom ":" start "-" end
+    }' "${NAME}_primary_lifted.bed" \
+    > "${NAME}_primary_keys.txt"
+
+    # Peaks not lifted in the primary pass
+    awk -F'\t' '
+    NR == FNR {
+        lifted[$1] = 1
+        next
+    }
+    {
+        key = $1 ":" $2 "-" $3
+        if (!(key in lifted)) print
+    }' "${NAME}_primary_keys.txt" \
+    "${NAME}_old.bed" \
+    > "${NAME}_left.bed"
+
+    # --------------------------------------------------------
+    # 7c. Extract old-assembly sequence for rescue
+    # --------------------------------------------------------
+
+    bedtools getfasta \
+        -fi "$OLD_FA" \
+        -bed "${NAME}_left.bed" \
+        -fo "${NAME}_left.fa" \
+        -name
+
+    # --------------------------------------------------------
+    # 7d. Align unlifted peak sequences to the new assembly
+    # --------------------------------------------------------
+
+    minimap2 \
+        -ax sr \
+        -t "$THREADS" \
+        "$NEW_FA" \
+        "${NAME}_left.fa" \
+        > "${NAME}_rescue.sam"
+
+    # --------------------------------------------------------
+    # 7e. Keep primary rescue alignments with sufficient MAPQ
+    #
+    # The FASTA header preserves the original peak ID and the
+    # old coordinates:
+    #   originalID::oldChrom:start-end
+    # ------------------------------------------------------------
+
+    awk -F'\t' '
+    /^@/ { next }
+    {
+        flag = $2
+        mapq = $5
+
+        # Keep primary alignments only:
+        # exclude secondary (0x100), supplementary (0x800),
+        # unmapped (0x4), and low-MAPQ alignments.
+        if (and(flag, 0x904)) next
+        if (mapq < 20) next
+
+        id = $1
+        sub(/.*::/, "", id)
+
+        split(id, b, ":")
+        chrom = b[1]
+        split(b[2], c, "-")
+
+        print $3, $4-1, $4-1+length($6), $1, 1000, "+"
+    }' "${NAME}_rescue.sam" \
+    > "${NAME}_rescued_all.bed"
+
+    # --------------------------------------------------------
+    # 7f. Keep only rescue peaks not already lifted
+    # ------------------------------------------------------------
+
+    awk -F'\t' '
+    NR == FNR {
+        rescue[$1] = 1
+        next
+    }
+    {
+        id = $4
+        sub(/.*::/, "", id)
+        split(id, b, ":")
+        chrom = b[1]
+        split(b[2], c, "-")
+        key = chrom ":" c[1] "-" c[2]
+
+        if (key in rescue) print
+    }' "${NAME}_rescue_keys.txt" \
+    "${NAME}_rescued_all.bed" \
+    > "${NAME}_rescue_only.bed"
+
+    # --------------------------------------------------------
+    # 7g. Create final non-duplicated transferred peak set
+    # ------------------------------------------------------------
+
+    cat "${NAME}_primary_lifted.bed" \
+        "${NAME}_rescue_only.bed" \
+        | sort -k1,1 -k2,2n \
+        > "${NAME}_new_final.bed"
+
+    # --------------------------------------------------------
+    # 7h. Identify peaks with no confident new-assembly placement
+    # ------------------------------------------------------------
+
+    awk -F'\t' '
+    {
+        id = $4
+
+        if (id ~ /::/) {
+            sub(/.*::/, "", id)
+            split(id, b, ":")
+            chrom = b[1]
+            split(b[2], c, "-")
+            print chrom ":" c[1] "-" c[2]
+        } else {
+            n = split(id, a, "_")
+            start = a[n-1]
+            end = a[n]
+            chrom = id
+            sub("_" start "_" end "$", "", chrom)
+            print chrom ":" start "-" end
+        }
+    }' "${NAME}_new_final.bed" \
+    > "${NAME}_final_keys.txt"
+
+    awk -F'\t' '
+    NR == FNR {
+        final[$1] = 1
+        next
+    }
+    {
+        key = $1 ":" $2 "-" $3
+        if (!(key in final)) print
+    }' "${NAME}_final_keys.txt" \
+    "${NAME}_old.bed" \
+    > "${NAME}_unmapped.bed"
+
+done
+
+# ------------------------------------------------------------
+# 8. FILTER FINAL PEAKS TO THE 44 CHROMOSOMES
+# ------------------------------------------------------------
+
+for NAME in Rep1 Rep2 Rep3 Consensus; do
+    awk -F'\t' -v pattern="$CHROM_REGEX" \
+        '$1 ~ pattern' \
+        "${NAME}_new_final.bed" \
+        > "${NAME}_new_final.chromosomes.bed"
+done
+
+# ------------------------------------------------------------
+# 9. CREATE FINAL COUNT SUMMARY
+# ------------------------------------------------------------
+
+{
+    echo -e "peak_set\toriginal_peaks\tprimary_lifted\trescue_only\tfinal_mapped\tchromosome_peaks\tunmapped"
+
+    for NAME in Rep1 Rep2 Rep3 Consensus; do
+
+        original=$(awk 'NF' "${NAME}_old.bed" | wc -l)
+        primary=$(awk 'NF' "${NAME}_primary_lifted.bed" | wc -l)
+        rescue_only=$(awk 'NF' "${NAME}_rescue_only.bed" | wc -l)
+        final=$(awk 'NF' "${NAME}_new_final.bed" | wc -l)
+        chrom=$(awk -F'\t' -v pattern="$CHROM_REGEX" \
+            '$1 ~ pattern' "${NAME}_new_final.bed" | wc -l)
+        unmapped=$(awk 'NF' "${NAME}_unmapped.bed" | wc -l)
+
+        echo -e "${NAME}\t${original}\t${primary}\t${rescue_only}\t${final}\t${chrom}\t${unmapped}"
+    done
+} > liftover_summary.tsv
+
+# ------------------------------------------------------------
+# 10. CREATE VALIDATION REPORT
+# ------------------------------------------------------------
+
+{
+    echo "Brand-new lift-over validation"
+    echo "Date: $(date)"
+    echo
+    echo "Old assembly: $OLD_FA"
+    echo "New assembly: $NEW_FA"
+    echo "Minimap2 preset: $MINIMAP2_PRESET"
+    echo "Rescue MAPQ threshold: $RESCUE_MAPQ"
+    echo
+    echo "Arithmetic checks:"
+    echo "final mapped = primary lifted + rescue-only peaks"
+    echo "original peaks = final mapped + unmapped peaks"
+    echo
+
+    for NAME in Rep1 Rep2 Rep3 Consensus; do
+
+        original=$(awk 'NF' "${NAME}_old.bed" | wc -l)
+        primary=$(awk 'NF' "${NAME}_primary_lifted.bed" | wc -l)
+        rescue_only=$(awk 'NF' "${NAME}_rescue_only.bed" | wc -l)
+        final=$(awk 'NF' "${NAME}_new_final.bed" | wc -l)
+        chrom=$(awk -F'\t' -v pattern="$CHROM_REGEX" \
+            '$1 ~ pattern' "${NAME}_new_final.bed" | wc -l)
+        unmapped=$(awk 'NF' "${NAME}_unmapped.bed" | wc -l)
+
+        echo "=== $NAME ==="
+        echo "Original peaks: $original"
+        echo "Primary lifted: $primary"
+        echo "Rescue-only peaks: $rescue_only"
+        echo "Final mapped peaks: $final"
+        echo "Peaks on 44 chromosomes: $chrom"
+        echo "Unmapped peaks: $unmapped"
+        echo
+    done
+} | tee validation_counts.txt
+
+# ------------------------------------------------------------
+# 11. FINAL REPORT
+# ------------------------------------------------------------
+
+echo
+echo "COMPLETE BRAND-NEW LIFT-OVER FINISHED"
+echo
+echo "Final Circos input files:"
+echo "$OUT/Rep1_new_final.chromosomes.bed"
+echo "$OUT/Rep2_new_final.chromosomes.bed"
+echo "$OUT/Rep3_new_final.chromosomes.bed"
+echo "$OUT/Consensus_new_final.chromosomes.bed"
+echo
+echo "Summary:"
+cat liftover_summary.tsv

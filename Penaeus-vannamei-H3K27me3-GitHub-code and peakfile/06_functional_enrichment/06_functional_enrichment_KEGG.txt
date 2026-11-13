@@ -1,0 +1,1823 @@
+############################################################
+## H3K27me3 ChIP-seq KEGG ENRICHMENT - KO BASED
+## Penaeus vannamei
+##
+## Matches Figure 6 (Bubble) and Figure 7 (Barplot)
+##
+## INPUT:
+##   Rep1_annotated_peaks.tsv
+##   Rep2_annotated_peaks.tsv
+##   Rep3_annotated_peaks.tsv
+##   Consensus_3of3_annotated_peaks.tsv
+##   pvm_ko.txt
+##   pvm_conv.txt
+##
+## ANALYSES:
+##   K27me3_Rep1_KO_Based
+##   K27me3_Rep2_KO_Based
+##   K27me3_Rep3_KO_Based
+##   K27me3_Consensus_KO_Based
+##
+## FOREGROUND:
+##   Non-intergenic, gene-associated H3K27me3 genes
+##
+## BACKGROUND:
+##   All genes associated with Rep1, Rep2, Rep3, Consensus
+##
+## PATHWAYS:
+##   MAP pathways only: mapXXXXX
+##
+## SIGNIFICANCE:
+##   All analyses: q <= 0.05 (BH-adjusted)
+##
+## FILTERS:
+##   q-value <= 0.05
+##   Odds ratio >= 2
+##   RichFactor >= 0.15
+##   Minimum foreground genes per pathway >= 8
+##   RichFactor < 0.75
+##
+## OUTPUT:
+##   Complete MAP-only pathway tables
+##   Strict-filtered pathway tables
+##   Supplementary text file (all strict pathways)
+##   Top-30 bar plots (Figure 7 matched)
+##   Top-30 bubble plots (Figure 6 matched)
+##   600 DPI PNG
+##   Times New Roman
+############################################################
+
+
+# ============================================================
+# 0. INSTALL AND LOAD PACKAGES
+# ============================================================
+
+cran_pkgs <- c(
+    "ggplot2",
+    "dplyr",
+    "stringr",
+    "scales",
+    "data.table",
+    "showtext"
+)
+
+for (pkg in cran_pkgs) {
+    
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        install.packages(
+            pkg,
+            repos = "https://cloud.r-project.org"
+        )
+    }
+    
+    library(
+        pkg,
+        character.only = TRUE
+    )
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages(
+        "BiocManager",
+        repos = "https://cloud.r-project.org"
+    )
+}
+
+if (!requireNamespace("KEGGREST", quietly = TRUE)) {
+    BiocManager::install(
+        "KEGGREST",
+        ask = FALSE,
+        update = FALSE
+    )
+}
+
+library(KEGGREST)
+
+
+# ============================================================
+# 1. FONT SETUP (TIMES NEW ROMAN)
+# ============================================================
+
+font_add(
+    family = "Times",
+    regular = "times.ttf",
+    bold = "timesbd.ttf",
+    italic = "timesi.ttf",
+    bolditalic = "timesbi.ttf"
+)
+
+showtext_auto()
+
+font_family <- "Times"
+
+
+# ============================================================
+# 2. PATHS
+# ============================================================
+
+base_dir <- paste0(
+    "D:/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/",
+    "MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2"
+)
+
+annotation_dir <- file.path(
+    base_dir,
+    "Four_File_Annotation_Output",
+    "annotated_tables"
+)
+
+out_dir_kegg <- file.path(
+    base_dir,
+    "KEGG_Results_H3K27me3_Replicates_Consensus"
+)
+
+dir.create(
+    out_dir_kegg,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+if (!dir.exists(out_dir_kegg)) {
+    stop(
+        "Output folder could not be created: ",
+        out_dir_kegg
+    )
+}
+
+message(
+    "Output folder is ready: ",
+    out_dir_kegg
+)
+
+
+# ============================================================
+# 3. INPUT FILES
+# ============================================================
+
+k27_files <- c(
+    
+    "K27me3_Rep1" = file.path(
+        annotation_dir,
+        "Rep1_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Rep2" = file.path(
+        annotation_dir,
+        "Rep2_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Rep3" = file.path(
+        annotation_dir,
+        "Rep3_annotated_peaks.tsv"
+    ),
+    
+    "K27me3_Consensus" = file.path(
+        annotation_dir,
+        "Consensus_3of3_annotated_peaks.tsv"
+    )
+)
+
+pvm_ko <- "D:/PVM/pvm_ko.txt"
+pvm_conv <- "D:/PVM/pvm_conv.txt"
+
+required_files <- c(
+    k27_files,
+    pvm_ko,
+    pvm_conv
+)
+
+missing_files <- required_files[
+    !file.exists(required_files)
+]
+
+if (length(missing_files) > 0) {
+    stop(
+        paste(
+            "Required file(s) missing:",
+            paste(missing_files, collapse = "\n"),
+            sep = "\n"
+        )
+    )
+}
+
+cat("\nInput peak files:\n")
+print(k27_files)
+
+cat("\nKO mapping file:\n")
+cat(pvm_ko, "\n")
+
+cat("\nConversion file:\n")
+cat(pvm_conv, "\n")
+
+
+# ============================================================
+# 4. PARAMETERS
+# ============================================================
+
+q_cutoff <- 0.05
+
+min_fg_genes <- 8
+min_odds_ratio <- 2.00
+min_rich_factor <- 0.15
+max_rich_factor <- 0.75
+
+bar_top_n <- 30
+bubble_top_n <- 30
+
+plot_dpi <- 600
+
+
+# ============================================================
+# 5. HELPER FUNCTIONS
+# ============================================================
+
+find_column_by_pattern <- function(
+        column_names,
+        patterns
+) {
+    
+    for (pattern in patterns) {
+        
+        hits <- grep(
+            pattern,
+            column_names,
+            ignore.case = TRUE,
+            value = TRUE
+        )
+        
+        if (length(hits) > 0) {
+            return(hits[1])
+        }
+    }
+    
+    return(NULL)
+}
+
+
+extract_ncbi_gene_id <- function(x) {
+    
+    x <- as.character(x)
+    
+    loc_id <- stringr::str_extract(
+        x,
+        "(?<=LOC)[0-9]+"
+    )
+    
+    geneid_id <- stringr::str_extract(
+        x,
+        "(?<=GeneID:)[0-9]+"
+    )
+    
+    numeric_id <- stringr::str_extract(
+        x,
+        "[0-9]+"
+    )
+    
+    gene_id <- ifelse(
+        !is.na(loc_id),
+        loc_id,
+        ifelse(
+            !is.na(geneid_id),
+            geneid_id,
+            numeric_id
+        )
+    )
+    
+    trimws(gene_id)
+}
+
+
+is_intergenic_annotation <- function(x) {
+    
+    x <- tolower(
+        trimws(
+            as.character(x)
+        )
+    )
+    
+    grepl(
+        "distal.*intergenic|intergenic",
+        x,
+        ignore.case = TRUE
+    )
+}
+
+
+is_gene_associated_annotation <- function(x) {
+    
+    !is_intergenic_annotation(x)
+}
+
+
+# ============================================================
+# HELPER: FORMAT Q-VALUE AS MATHEMATICAL EXPRESSION
+# ============================================================
+
+format_q_math <- function(q) {
+    
+    if (is.na(q) || q <= 0) {
+        return("q == NA")
+    }
+    
+    exponent <- floor(log10(q))
+    mantissa <- q / (10^exponent)
+    
+    sprintf("q == %.2f %%*%% 10^{%d}", mantissa, exponent)
+}
+
+
+# ============================================================
+# 6. READ ONE ANNOTATION FILE
+# ============================================================
+
+read_annotation_file <- function(
+        filepath,
+        sample_name
+) {
+    
+    message("\n============================================================")
+    message("Reading: ", basename(filepath))
+    message("Sample: ", sample_name)
+    message("============================================================")
+    
+    df <- data.table::fread(
+        filepath,
+        fill = TRUE,
+        data.table = FALSE,
+        showProgress = FALSE
+    )
+    
+    if (nrow(df) == 0) {
+        stop(
+            "Annotation file is empty: ",
+            filepath
+        )
+    }
+    
+    colnames(df) <- make.names(
+        colnames(df),
+        unique = TRUE
+    )
+    
+    annotation_col <- find_column_by_pattern(
+        colnames(df),
+        c(
+            "^annotation$",
+            "annotation",
+            "feature",
+            "genomic.*region",
+            "region",
+            "category",
+            "location"
+        )
+    )
+    
+    gene_col <- find_column_by_pattern(
+        colnames(df),
+        c(
+            "entrez",
+            "^geneid$",
+            "gene_id",
+            "geneid",
+            "gene.*id",
+            "nearest.*gene",
+            "gene"
+        )
+    )
+    
+    if (is.null(annotation_col)) {
+        stop(
+            "Could not detect annotation column in: ",
+            basename(filepath)
+        )
+    }
+    
+    if (is.null(gene_col)) {
+        stop(
+            "Could not detect gene-ID column in: ",
+            basename(filepath)
+        )
+    }
+    
+    df$annotation_clean <- trimws(
+        as.character(df[[annotation_col]])
+    )
+    
+    df$gene_id_clean <- extract_ncbi_gene_id(
+        df[[gene_col]]
+    )
+    
+    df <- df[
+        !is.na(df$gene_id_clean) &
+            df$gene_id_clean != "",
+        ,
+        drop = FALSE
+    ]
+    
+    if (nrow(df) == 0) {
+        stop(
+            "No usable gene IDs were extracted from: ",
+            basename(filepath)
+        )
+    }
+    
+    df$intergenic_flag <- is_intergenic_annotation(
+        df$annotation_clean
+    )
+    
+    df$gene_associated_flag <- is_gene_associated_annotation(
+        df$annotation_clean
+    )
+    
+    all_genes <- unique(
+        as.character(df$gene_id_clean)
+    )
+    
+    gene_associated_genes <- unique(
+        as.character(
+            df$gene_id_clean[
+                df$gene_associated_flag
+            ]
+        )
+    )
+    
+    message(
+        "Peak rows with usable gene IDs: ",
+        nrow(df)
+    )
+    
+    message(
+        "Unique genes from all peaks: ",
+        length(all_genes)
+    )
+    
+    message(
+        "Unique gene-associated non-intergenic genes: ",
+        length(gene_associated_genes)
+    )
+    
+    return(
+        list(
+            all = all_genes,
+            gene_associated = gene_associated_genes,
+            data = df
+        )
+    )
+}
+
+
+# ============================================================
+# 7. READ ALL FILES
+# ============================================================
+
+message("\n============================================================")
+message("READING H3K27me3 ANNOTATION FILES")
+message("============================================================")
+
+k27_data <- lapply(
+    names(k27_files),
+    function(sample_name) {
+        
+        read_annotation_file(
+            filepath = k27_files[[sample_name]],
+            sample_name = sample_name
+        )
+    }
+)
+
+names(k27_data) <- names(k27_files)
+
+
+# ============================================================
+# 8. CREATE BACKGROUND UNIVERSE
+# ============================================================
+
+background_all <- unique(
+    unlist(
+        lapply(
+            k27_data,
+            `[[`,
+            "all"
+        ),
+        use.names = FALSE
+    )
+)
+
+if (length(background_all) == 0) {
+    stop(
+        "The background gene universe is empty."
+    )
+}
+
+message(
+    "\nAll peak-associated background genes: ",
+    length(background_all)
+)
+
+gene_set_summary <- data.table(
+    Sample = names(k27_data),
+    
+    All_peak_associated_genes = vapply(
+        k27_data,
+        function(x) length(x$all),
+        integer(1)
+    ),
+    
+    Gene_associated_nonintergenic_genes = vapply(
+        k27_data,
+        function(x) length(x$gene_associated),
+        integer(1)
+    ),
+    
+    Background_all_peak_associated_genes = length(background_all)
+)
+
+fwrite(
+    gene_set_summary,
+    file.path(
+        out_dir_kegg,
+        "K27me3_KEGG_Gene_Set_Summary.csv"
+    )
+)
+
+cat("\nGene-set summary:\n")
+print(gene_set_summary)
+
+
+# ============================================================
+# 9. LOAD KO MAPPING
+# ============================================================
+
+message("\n============================================================")
+message("LOADING PVM KO MAPPING")
+message("============================================================")
+
+ko_df <- data.table::fread(
+    pvm_ko,
+    header = FALSE,
+    sep = "\t",
+    fill = TRUE,
+    data.table = FALSE
+)
+
+if (ncol(ko_df) < 2) {
+    stop(
+        "The KO mapping file must contain at least two columns."
+    )
+}
+
+ko_df <- ko_df[, 1:2, drop = FALSE]
+
+colnames(ko_df) <- c(
+    "kegg_gene_id",
+    "ko_id"
+)
+
+ko_df$entrez_id <- gsub(
+    "^pvm:",
+    "",
+    as.character(ko_df$kegg_gene_id)
+)
+
+ko_df$ko_id <- gsub(
+    "^ko:",
+    "",
+    as.character(ko_df$ko_id)
+)
+
+ko_df$entrez_id <- trimws(
+    ko_df$entrez_id
+)
+
+ko_df$ko_id <- trimws(
+    ko_df$ko_id
+)
+
+ko_df <- ko_df[
+    ko_df$entrez_id != "" &
+        ko_df$ko_id != "" &
+        !is.na(ko_df$entrez_id) &
+        !is.na(ko_df$ko_id),
+    ,
+    drop = FALSE
+]
+
+gene2ko <- split(
+    ko_df$ko_id,
+    ko_df$entrez_id
+)
+
+gene2ko <- lapply(
+    gene2ko,
+    unique
+)
+
+message(
+    "Genes with KO annotation: ",
+    length(gene2ko)
+)
+
+
+# ============================================================
+# 10. DOWNLOAD KEGG MAPPINGS
+# ============================================================
+
+message("\n============================================================")
+message("DOWNLOADING KEGG KO-TO-PATHWAY MAPPING")
+message("============================================================")
+
+ko_pathway_raw <- tryCatch(
+    {
+        KEGGREST::keggLink(
+            "pathway",
+            "ko"
+        )
+    },
+    error = function(e) {
+        stop(
+            "Could not download KEGG KO-to-pathway mapping. ",
+            "Check your internet connection.\n",
+            conditionMessage(e)
+        )
+    }
+)
+
+ko_pathway_df <- data.frame(
+    ko_id = gsub(
+        "^ko:",
+        "",
+        names(ko_pathway_raw)
+    ),
+    pathway_id = gsub(
+        "^path:",
+        "",
+        as.character(ko_pathway_raw)
+    ),
+    stringsAsFactors = FALSE
+)
+
+ko_pathway_df <- ko_pathway_df[
+    grepl(
+        "^map[0-9]{5}$",
+        ko_pathway_df$pathway_id
+    ),
+    ,
+    drop = FALSE
+]
+
+ko_pathway_df <- unique(
+    ko_pathway_df
+)
+
+message(
+    "MAP-only KO-pathway pairs: ",
+    nrow(ko_pathway_df)
+)
+
+
+# ============================================================
+# 11. DOWNLOAD PATHWAY NAMES
+# ============================================================
+
+message("\n============================================================")
+message("DOWNLOADING KEGG PATHWAY NAMES")
+message("============================================================")
+
+pathway_list <- tryCatch(
+    {
+        KEGGREST::keggList(
+            "pathway"
+        )
+    },
+    error = function(e) {
+        stop(
+            "Could not download KEGG pathway names.\n",
+            conditionMessage(e)
+        )
+    }
+)
+
+pathway_names <- data.frame(
+    pathway_id = gsub(
+        "^path:",
+        "",
+        names(pathway_list)
+    ),
+    pathway_name = as.character(pathway_list),
+    stringsAsFactors = FALSE
+)
+
+pathway_names$pathway_name <- gsub(
+    " \\[.*$",
+    "",
+    pathway_names$pathway_name
+)
+
+pathway_names$pathway_name <- trimws(
+    pathway_names$pathway_name
+)
+
+pathway_names <- pathway_names[
+    grepl(
+        "^map[0-9]{5}$",
+        pathway_names$pathway_id
+    ),
+    ,
+    drop = FALSE
+]
+
+map_pathway_ids <- unique(
+    ko_pathway_df$pathway_id
+)
+
+pathway_names <- pathway_names[
+    pathway_names$pathway_id %in% map_pathway_ids,
+    ,
+    drop = FALSE
+]
+
+missing_pathway_ids <- setdiff(
+    map_pathway_ids,
+    pathway_names$pathway_id
+)
+
+if (length(missing_pathway_ids) > 0) {
+    
+    pathway_names <- rbind(
+        pathway_names,
+        data.frame(
+            pathway_id = missing_pathway_ids,
+            pathway_name = missing_pathway_ids,
+            stringsAsFactors = FALSE
+        )
+    )
+}
+
+pathway_names <- pathway_names[
+    !duplicated(pathway_names$pathway_id),
+    ,
+    drop = FALSE
+]
+
+
+# ============================================================
+# 12. BUILD GENE-TO-PATHWAY MAPPING
+# ============================================================
+
+ko2pathway <- split(
+    ko_pathway_df$pathway_id,
+    ko_pathway_df$ko_id
+)
+
+ko2pathway <- lapply(
+    ko2pathway,
+    unique
+)
+
+gene2pathway <- list()
+
+for (gene_id in names(gene2ko)) {
+    
+    ko_terms <- gene2ko[[gene_id]]
+    
+    pathway_ids <- unique(
+        unlist(
+            ko2pathway[ko_terms],
+            use.names = FALSE
+        )
+    )
+    
+    pathway_ids <- pathway_ids[
+        !is.na(pathway_ids) &
+            grepl(
+                "^map[0-9]{5}$",
+                pathway_ids
+            )
+    ]
+    
+    if (length(pathway_ids) > 0) {
+        gene2pathway[[gene_id]] <- pathway_ids
+    }
+}
+
+pathway2gene <- list()
+
+for (gene_id in names(gene2pathway)) {
+    
+    for (pathway_id in gene2pathway[[gene_id]]) {
+        
+        if (is.null(pathway2gene[[pathway_id]])) {
+            pathway2gene[[pathway_id]] <- gene_id
+        } else {
+            pathway2gene[[pathway_id]] <- unique(
+                c(
+                    pathway2gene[[pathway_id]],
+                    gene_id
+                )
+            )
+        }
+    }
+}
+
+kegg_data <- list(
+    pathway_info = pathway_names,
+    gene2pathway = gene2pathway,
+    pathway2gene = pathway2gene
+)
+
+message(
+    "Genes with MAP pathway annotation: ",
+    length(gene2pathway)
+)
+
+message(
+    "MAP pathways in database: ",
+    length(pathway2gene)
+)
+
+
+# ============================================================
+# 13. KEGG CATEGORY FUNCTION
+# ============================================================
+
+get_kegg_category <- function(pathway_id) {
+    
+    pathway_id <- as.character(pathway_id)
+    
+    if (grepl("^map0[0-1]", pathway_id)) {
+        return("Metabolism")
+    }
+    
+    if (grepl("^map02", pathway_id)) {
+        return("Environmental Information Processing")
+    }
+    
+    if (grepl("^map03", pathway_id)) {
+        return("Genetic Information Processing")
+    }
+    
+    if (grepl("^map04", pathway_id)) {
+        return("Cellular Processes")
+    }
+    
+    if (grepl("^map05", pathway_id)) {
+        return("Human Diseases")
+    }
+    
+    if (grepl("^map09", pathway_id)) {
+        return("Organismal Systems")
+    }
+    
+    return("Other")
+}
+
+
+# ============================================================
+# 14. EXACT COLOR PALETTES (FIGURE 6 & 7 MATCHED)
+# ============================================================
+
+kegg_colors <- c(
+    "Cellular Processes"                  = "#17BECF",
+    "Environmental Information Processing" = "#FF7F0E",
+    "Genetic Information Processing"       = "#9467BD",
+    "Human Diseases"                      = "#8C564B",
+    "Metabolism"                          = "#1F77B4",
+    "Organismal Systems"                  = "#D62728",
+    "Other"                               = "#7F7F7F"
+)
+
+qvalue_gradient_colors <- c(
+    "#72E372",
+    "#E6E64D",
+    "#FF7F66"
+)
+
+
+# ============================================================
+# 15. KEGG ENRICHMENT
+# ============================================================
+
+run_kegg_enrichment_map_only <- function(
+        fg_genes,
+        bg_genes,
+        kegg_dat
+) {
+    
+    gene2pathway <- kegg_dat$gene2pathway
+    pathway2gene <- kegg_dat$pathway2gene
+    pathway_info <- kegg_dat$pathway_info
+    
+    fg_genes <- unique(
+        as.character(fg_genes)
+    )
+    
+    bg_genes <- unique(
+        as.character(bg_genes)
+    )
+    
+    fg_genes <- intersect(
+        fg_genes,
+        bg_genes
+    )
+    
+    bg_mapped <- intersect(
+        bg_genes,
+        names(gene2pathway)
+    )
+    
+    fg_mapped <- intersect(
+        fg_genes,
+        names(gene2pathway)
+    )
+    
+    n_bg <- length(bg_mapped)
+    n_fg <- length(fg_mapped)
+    
+    message(
+        "  Foreground genes mapped to KEGG: ",
+        n_fg,
+        "/",
+        length(fg_genes)
+    )
+    
+    message(
+        "  Background genes mapped to KEGG: ",
+        n_bg,
+        "/",
+        length(bg_genes)
+    )
+    
+    if (n_fg < 1 || n_bg < 1) {
+        return(NULL)
+    }
+    
+    all_pathways <- unique(
+        unlist(
+            gene2pathway[bg_mapped],
+            use.names = FALSE
+        )
+    )
+    
+    all_pathways <- all_pathways[
+        grepl(
+            "^map[0-9]{5}$",
+            all_pathways
+        )
+    ]
+    
+    if (length(all_pathways) == 0) {
+        return(NULL)
+    }
+    
+    result_list <- lapply(
+        all_pathways,
+        function(pathway_id) {
+            
+            pathway_genes <- pathway2gene[[pathway_id]]
+            
+            if (
+                is.null(pathway_genes) ||
+                length(pathway_genes) == 0
+            ) {
+                return(NULL)
+            }
+            
+            fg_pathway_genes <- intersect(
+                fg_mapped,
+                pathway_genes
+            )
+            
+            bg_pathway_genes <- intersect(
+                bg_mapped,
+                pathway_genes
+            )
+            
+            a <- length(fg_pathway_genes)
+            
+            if (a == 0) {
+                return(NULL)
+            }
+            
+            b <- n_fg - a
+            c_value <- length(bg_pathway_genes) - a
+            d <- n_bg - length(bg_pathway_genes)
+            
+            if (any(c(a, b, c_value, d) < 0)) {
+                return(NULL)
+            }
+            
+            fisher_matrix <- matrix(
+                c(a, b, c_value, d),
+                nrow = 2,
+                byrow = TRUE
+            )
+            
+            fisher_result <- tryCatch(
+                fisher.test(
+                    fisher_matrix,
+                    alternative = "greater"
+                ),
+                error = function(e) {
+                    NULL
+                }
+            )
+            
+            if (is.null(fisher_result)) {
+                return(NULL)
+            }
+            
+            pathway_name <- pathway_info$pathway_name[
+                match(
+                    pathway_id,
+                    pathway_info$pathway_id
+                )
+            ]
+            
+            if (
+                length(pathway_name) == 0 ||
+                is.na(pathway_name) ||
+                pathway_name == ""
+            ) {
+                pathway_name <- pathway_id
+            }
+            
+            odds_ratio <- unname(
+                as.numeric(
+                    fisher_result$estimate
+                )
+            )
+            
+            if (
+                is.na(odds_ratio) ||
+                is.nan(odds_ratio)
+            ) {
+                odds_ratio <- Inf
+            }
+            
+            data.frame(
+                pathway_id = pathway_id,
+                pathway_name = pathway_name,
+                fg_in_path = a,
+                bg_in_path = length(bg_pathway_genes),
+                n_fg = n_fg,
+                n_bg = n_bg,
+                GeneRatio = a / n_fg,
+                BgRatio = length(bg_pathway_genes) / n_bg,
+                RichFactor = a / length(bg_pathway_genes),
+                pvalue = fisher_result$p.value,
+                odds_ratio = odds_ratio,
+                stringsAsFactors = FALSE
+            )
+        }
+    )
+    
+    result_list <- Filter(
+        Negate(is.null),
+        result_list
+    )
+    
+    if (length(result_list) == 0) {
+        return(NULL)
+    }
+    
+    results <- do.call(
+        rbind,
+        result_list
+    )
+    
+    results$qvalue <- p.adjust(
+        results$pvalue,
+        method = "BH"
+    )
+    
+    results <- results[
+        order(
+            results$qvalue,
+            results$pvalue,
+            -results$fg_in_path
+        ),
+        ,
+        drop = FALSE
+    ]
+    
+    results <- results[
+        !duplicated(results$pathway_id),
+        ,
+        drop = FALSE
+    ]
+    
+    results <- results[
+        !duplicated(
+            tolower(
+                trimws(
+                    results$pathway_name
+                )
+            )
+        ),
+        ,
+        drop = FALSE
+    ]
+    
+    rownames(results) <- NULL
+    
+    return(results)
+}
+
+
+# ============================================================
+# 16. STRICT FILTER
+# ============================================================
+
+filter_kegg_results_strict <- function(
+        results
+) {
+    
+    if (
+        is.null(results) ||
+        nrow(results) == 0
+    ) {
+        return(results)
+    }
+    
+    filtered_results <- results[
+        !is.na(results$qvalue) &
+            results$qvalue <= q_cutoff &
+            !is.na(results$fg_in_path) &
+            results$fg_in_path >= min_fg_genes &
+            !is.na(results$odds_ratio) &
+            (
+                is.infinite(results$odds_ratio) |
+                    results$odds_ratio >= min_odds_ratio
+            ) &
+            !is.na(results$RichFactor) &
+            is.finite(results$RichFactor) &
+            results$RichFactor >= min_rich_factor &
+            results$RichFactor < max_rich_factor,
+        ,
+        drop = FALSE
+    ]
+    
+    filtered_results <- filtered_results[
+        order(
+            filtered_results$qvalue,
+            -filtered_results$fg_in_path,
+            -filtered_results$RichFactor
+        ),
+        ,
+        drop = FALSE
+    ]
+    
+    rownames(filtered_results) <- NULL
+    
+    return(filtered_results)
+}
+
+
+# ============================================================
+# 17. PREPARE PLOT DATA (NO WRAPPING, SINGLE-LINE LABELS)
+# ============================================================
+
+prepare_plot_data <- function(
+        results,
+        top_n,
+        plot_type = "bar"
+) {
+    
+    if (
+        is.null(results) ||
+        nrow(results) == 0
+    ) {
+        return(NULL)
+    }
+    
+    results <- results[
+        order(
+            results$qvalue,
+            -results$fg_in_path
+        ),
+        ,
+        drop = FALSE
+    ]
+    
+    results <- head(
+        results,
+        top_n
+    )
+    
+    results$kegg_category <- vapply(
+        results$pathway_id,
+        get_kegg_category,
+        character(1)
+    )
+    
+    results$plot_label <- trimws(
+        as.character(
+            results$pathway_name
+        )
+    )
+    
+    results$plot_label <- factor(
+        results$plot_label,
+        levels = rev(
+            unique(
+                results$plot_label
+            )
+        )
+    )
+    
+    return(results)
+}
+
+
+# ============================================================
+# 18. KEGG BAR PLOT (MATHEMATICAL NOTATION, 40-45PT FONTS)
+# ============================================================
+
+plot_kegg_bar <- function(
+        results,
+        label,
+        out_file
+) {
+    
+    df <- prepare_plot_data(
+        results = results,
+        top_n = bar_top_n,
+        plot_type = "bar"
+    )
+    
+    if (
+        is.null(df) ||
+        nrow(df) == 0
+    ) {
+        message(
+            "No pathways available for bar plot: ",
+            label
+        )
+        return(invisible(NULL))
+    }
+    
+    p <- ggplot(
+        df,
+        aes(
+            x = plot_label,
+            y = fg_in_path,
+            fill = kegg_category
+        )
+    ) +
+        geom_col(
+            width = 0.7
+        ) +
+        geom_text(
+            aes(
+                label = sapply(qvalue, format_q_math)
+            ),
+            parse = TRUE,
+            hjust = -0.05,
+            size = 10,
+            family = "Times",
+            color = "black"
+        ) +
+        coord_flip() +
+        scale_fill_manual(
+            values = kegg_colors,
+            name = "KEGG Category"
+        ) +
+        scale_y_continuous(
+            expand = expansion(
+                mult = c(0.05, 0.5)
+            )
+        ) +
+        labs(
+            title = paste0(
+                label,
+                " KEGG Pathways"
+            ),
+            subtitle = "BH-adjusted q ≤ 0.05 | MAP pathways only",
+            x = "Pathway",
+            y = "Number of Genes"
+        ) +
+        theme_bw(
+            base_size = 11
+        ) +
+        theme(
+            text = element_text(
+                family = "Times"
+            ),
+            plot.title = element_text(
+                hjust = 0.5,
+                size = 45,
+                face = "bold",
+                family = "Times"
+            ),
+            plot.subtitle = element_text(
+                hjust = 0.5,
+                size = 40,
+                colour = "grey30",
+                family = "Times"
+            ),
+            axis.text.y = element_text(
+                size = 40,
+                color = "black",
+                family = "Times"
+            ),
+            axis.text.x = element_text(
+                size = 40,
+                color = "black",
+                family = "Times"
+            ),
+            axis.title = element_text(
+                size = 45,
+                face = "bold",
+                family = "Times"
+            ),
+            legend.title = element_text(
+                size = 45,
+                face = "bold",
+                family = "Times"
+            ),
+            legend.text = element_text(
+                size = 40,
+                family = "Times"
+            ),
+            panel.grid.major = element_line(
+                color = "grey92"
+            ),
+            panel.grid.minor = element_blank(),
+            plot.background = element_rect(
+                fill = "white",
+                color = NA
+            ),
+            panel.background = element_rect(
+                fill = "white",
+                color = NA
+            )
+        )
+    
+    ggsave(
+        filename = out_file,
+        plot = p,
+        width = 14,
+        height = 10,
+        units = "in",
+        dpi = 300,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    message(
+        "KEGG bar plot saved: ",
+        out_file
+    )
+    
+    invisible(p)
+}
+
+
+# ============================================================
+# 19. KEGG BUBBLE PLOT (40-45PT FONTS, FIXED SYNTAX)
+# ============================================================
+
+plot_kegg_bubble <- function(
+        results,
+        label,
+        out_file
+) {
+    
+    df <- prepare_plot_data(
+        results = results,
+        top_n = bubble_top_n,
+        plot_type = "bubble"
+    )
+    
+    if (
+        is.null(df) ||
+        nrow(df) == 0
+    ) {
+        message(
+            "No pathways available for bubble plot: ",
+            label
+        )
+        return(invisible(NULL))
+    }
+    
+    df$Gene_Number <- df$fg_in_path
+    
+    p <- ggplot(
+        df,
+        aes(
+            x = RichFactor,
+            y = plot_label
+        )
+    ) +
+        geom_point(
+            aes(
+                size = Gene_Number,
+                color = qvalue
+            )
+        ) +
+        scale_color_gradientn(
+            colors = c(
+                "#72E372",
+                "#E6E64D",
+                "#FF7F66"
+            ),
+            name = "Qvalue"
+        ) +
+        scale_size_continuous(
+            name = "Gene_Number",
+            range = c(3, 8)
+        ) +
+        scale_x_continuous(
+            expand = expansion(
+                mult = c(0.05, 0.5)
+            )
+        ) +
+        labs(
+            title = paste0(
+                label,
+                " KEGG Bubble plot"
+            ),
+            subtitle = "BH-adjusted q ≤ 0.05 | MAP pathways only",
+            x = "RichFactor",
+            y = "PathwayTerm"
+        ) +
+        theme_bw(
+            base_size = 22
+        ) +
+        theme(
+            text = element_text(
+                family = "Times"
+            ),
+            plot.title = element_text(
+                hjust = 0.5,
+                size = 45,
+                face = "bold",
+                family = "Times"
+            ),
+            plot.subtitle = element_text(
+                hjust = 0.5,
+                size = 40,
+                colour = "grey30",
+                family = "Times"
+            ),
+            axis.text.y = element_text(
+                size = 40,
+                color = "black",
+                family = "Times"
+            ),
+            axis.text.x = element_text(
+                size = 40,
+                color = "black",
+                family = "Times"
+            ),
+            axis.title = element_text(
+                size = 40,
+                face = "bold",
+                family = "Times"
+            ),
+            legend.title = element_text(
+                size = 40,
+                face = "bold",
+                family = "Times"
+            ),
+            legend.text = element_text(
+                size = 45,
+                family = "Times"
+            ),
+            panel.grid.major = element_line(
+                color = "grey92"
+            ),
+            panel.grid.minor = element_blank(),
+            plot.background = element_rect(
+                fill = "white",
+                color = NA
+            ),
+            panel.background = element_rect(
+                fill = "white",
+                color = NA
+            )
+        )
+    
+    ggsave(
+        filename = out_file,
+        plot = p,
+        width = 13,
+        height = 10,
+        units = "in",
+        dpi = 300,
+        bg = "white",
+        limitsize = FALSE
+    )
+    
+    message(
+        "KEGG bubble plot saved: ",
+        out_file
+    )
+    
+    invisible(p)
+}
+
+
+# ============================================================
+# 20. MASTER KEGG ANALYSIS FUNCTION
+# ============================================================
+
+run_kegg_analysis <- function(
+        fg_genes,
+        bg_genes,
+        label
+) {
+    
+    message("\n============================================================")
+    message("KEGG ANALYSIS: ", label)
+    message("q-value cutoff: ", q_cutoff)
+    message("============================================================")
+    
+    raw_results <- run_kegg_enrichment_map_only(
+        fg_genes = fg_genes,
+        bg_genes = bg_genes,
+        kegg_dat = kegg_data
+    )
+    
+    if (
+        is.null(raw_results) ||
+        nrow(raw_results) == 0
+    ) {
+        message(
+            "No raw KEGG results generated for: ",
+            label
+        )
+        return(NULL)
+    }
+    
+    raw_results_file <- file.path(
+        out_dir_kegg,
+        paste0(
+            label,
+            "_KEGG_ALL_MAP_ONLY_results.csv"
+        )
+    )
+    
+    fwrite(
+        as.data.table(raw_results),
+        raw_results_file
+    )
+    
+    strict_results <- filter_kegg_results_strict(
+        raw_results
+    )
+    
+    strict_results_file <- file.path(
+        out_dir_kegg,
+        paste0(
+            label,
+            "_KEGG_STRICT_FILTERED_q0.05_results.csv"
+        )
+    )
+    
+    fwrite(
+        as.data.table(strict_results),
+        strict_results_file
+    )
+    
+    message(
+        "Raw MAP pathways: ",
+        nrow(raw_results)
+    )
+    
+    message(
+        "Strict pathways retained: ",
+        nrow(strict_results)
+    )
+    
+    if (
+        is.null(strict_results) ||
+        nrow(strict_results) == 0
+    ) {
+        message(
+            "No pathways passed the strict filters for: ",
+            label
+        )
+        
+        return(
+            list(
+                raw = raw_results,
+                strict = strict_results
+            )
+        )
+    }
+    
+    bar_file <- file.path(
+        out_dir_kegg,
+        paste0(
+            label,
+            "_KEGG_Top30_Barplot_q0.05.png"
+        )
+    )
+    
+    bubble_file <- file.path(
+        out_dir_kegg,
+        paste0(
+            label,
+            "_KEGG_Top30_Bubbleplot_q0.05.png"
+        )
+    )
+    
+    plot_kegg_bar(
+        results = strict_results,
+        label = label,
+        out_file = bar_file
+    )
+    
+    plot_kegg_bubble(
+        results = strict_results,
+        label = label,
+        out_file = bubble_file
+    )
+    
+    return(
+        list(
+            raw = raw_results,
+            strict = strict_results
+        )
+    )
+}
+
+
+# ============================================================
+# 21. RUN ALL FOUR ANALYSES
+# ============================================================
+
+all_kegg_results <- list()
+
+for (sample_name in names(k27_data)) {
+    
+    label <- paste0(
+        sample_name,
+        "_KO_Based"
+    )
+    
+    all_kegg_results[[label]] <- run_kegg_analysis(
+        fg_genes = k27_data[[sample_name]]$gene_associated,
+        bg_genes = background_all,
+        label = label
+    )
+}
+
+# ============================================================
+# 22. CREATE SEPARATE SUPPLEMENTARY TXT FILES (ONE PER ANALYSIS)
+# ============================================================
+
+for (label in names(all_kegg_results)) {
+    
+    result <- all_kegg_results[[label]]
+    
+    if (
+        is.null(result) ||
+        is.null(result$strict) ||
+        nrow(result$strict) == 0
+    ) {
+        message(
+            "Note: ",
+            label,
+            " has no pathways passing filters. Skipping."
+        )
+        next
+    }
+    
+    dt <- as.data.table(result$strict)
+    
+    dt[, Analysis := label]
+    
+    ## PLAIN TEXT Q-VALUE
+    dt[, qvalue_plain := sprintf("q = %.2f × 10^%d",
+                                 qvalue / (10^floor(log10(qvalue))),
+                                 floor(log10(qvalue)))]
+    
+    ## SCIENTIFIC NOTATION
+    dt[, qvalue_scientific := sprintf("q = %.2e", qvalue)]
+    
+    ## SORT BY Q-VALUE
+    dt <- dt[
+        order(
+            qvalue,
+            -fg_in_path
+        )
+    ]
+    
+    ## SELECT READABLE COLUMNS
+    output_cols <- c(
+        "Analysis",
+        "pathway_id",
+        "pathway_name",
+        "fg_in_path",
+        "bg_in_path",
+        "GeneRatio",
+        "RichFactor",
+        "odds_ratio",
+        "pvalue",
+        "qvalue",
+        "qvalue_plain",
+        "qvalue_scientific"
+    )
+    
+    ## CREATE FILE NAME
+    supplementary_file <- file.path(
+        out_dir_kegg,
+        paste0(
+            label,
+            "_KEGG_Supplementary_Strict_Pathways_q0.05.txt"
+        )
+    )
+    
+    write.table(
+        as.data.frame(dt[, ..output_cols]),
+        file = supplementary_file,
+        sep = "\t",
+        row.names = FALSE,
+        quote = FALSE
+    )
+    
+    message(
+        "\n============================================================"
+    )
+    message("SUPPLEMENTARY FILE GENERATED")
+    message("============================================================")
+    message("Analysis: ", label)
+    message("File: ", supplementary_file)
+    message("Total pathways: ", nrow(dt))
+}
+
+message(
+    "\n============================================================"
+)
+message("ALL SUPPLEMENTARY FILES CREATED")
+message("============================================================")
+message(
+    "4 separate TXT files generated:\n",
+    "  1. K27me3_Rep1_KO_Based_KEGG_Supplementary_Strict_Pathways_q0.05.txt\n",
+    "  2. K27me3_Rep2_KO_Based_KEGG_Supplementary_Strict_Pathways_q0.05.txt\n",
+    "  3. K27me3_Rep3_KO_Based_KEGG_Supplementary_Strict_Pathways_q0.05.txt\n",
+    "  4. K27me3_Consensus_KO_Based_KEGG_Supplementary_Strict_Pathways_q0.05.txt"
+)
+# ============================================================
+# 23. FINAL SUMMARY
+# ============================================================
+
+kegg_summary <- rbindlist(
+    lapply(
+        names(all_kegg_results),
+        function(label) {
+            
+            result <- all_kegg_results[[label]]
+            
+            if (
+                is.null(result) ||
+                is.null(result$raw)
+            ) {
+                return(
+                    data.table(
+                        Analysis = label,
+                        Raw_MAP_pathways = 0L,
+                        Strict_pathways_q0.05 = 0L
+                    )
+                )
+            }
+            
+            data.table(
+                Analysis = label,
+                Raw_MAP_pathways = nrow(result$raw),
+                Strict_pathways_q0.05 = ifelse(
+                    is.null(result$strict),
+                    0L,
+                    nrow(result$strict)
+                )
+            )
+        }
+    ),
+    fill = TRUE
+)
+
+fwrite(
+    kegg_summary,
+    file.path(
+        out_dir_kegg,
+        "K27me3_KEGG_Analysis_Summary.csv"
+    )
+)
+
+message("\n============================================================")
+message("H3K27me3 KEGG ANALYSIS COMPLETE")
+message("============================================================")
+message("All analyses used q <= 0.05.")
+message("Analyses: Rep1, Rep2, Rep3, Consensus.")
+message("Pathways: MAP only.")
+message("Plots: 600 DPI PNG, Figure 6 & 7 matched.")
+message("Font: Times New Roman.")
+message("Output directory: ", out_dir_kegg)
+
+cat("\nKEGG summary:\n")
+print(kegg_summary)
+
+cat("\nGene-set summary:\n")
+print(gene_set_summary)

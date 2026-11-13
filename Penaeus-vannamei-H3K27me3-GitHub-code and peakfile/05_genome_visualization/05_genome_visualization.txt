@@ -1,0 +1,337 @@
+## ======================================================================
+## FIGURE 4 - Circos of H3K27me3 peaks on the 44 chromosomes of
+## ASM4276789v1 (GCF_042767895.1)
+##
+## Uses the NEW brand-new lift-over results:
+##   minimap2 -cx asm10 NEW OLD -> new_target_old_query.paf
+##   paftools.js liftover -l 0 -q 0
+##   minimap2 rescue of unlifted peaks
+##   coordinate-based duplicate removal
+##
+## Input BED files:
+##   Rep1_new_final.chromosomes.bed
+##   Rep2_new_final.chromosomes.bed
+##   Rep3_new_final.chromosomes.bed
+##   Consensus_new_final.chromosomes.bed
+## ======================================================================
+
+options(error = NULL)
+graphics.off()
+
+suppressPackageStartupMessages({
+    library(circlize)
+    library(data.table)
+    library(GenomicRanges)
+})
+
+## ---------------- 1. PATHS: EDIT ONLY THIS BLOCK ---------------------
+
+## New lift-over output folder.
+## In Windows R, /mnt/d/... is D:/...
+new_liftover_dir <- "D:/liftover_out/brand_new_2026-11-14"
+
+## New-assembly FASTA index.
+## This file was created by:
+##   samtools faidx GCF_042767895.1_ASM4276789v1_genomic.fna
+fai_f <- "D:/genomes/Pvannamei_2024/GCF_042767895.1_ASM4276789v1_genomic.fna.fai"
+
+## Output folder for the new Figure 4
+out_dir <- "D:/liftover_out/Figure4_new_liftover"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+## Final chromosome-only BED files produced by the brand-new lift-over
+new_peaks <- list(
+    K27_I1    = file.path(new_liftover_dir, "Rep1_new_final.chromosomes.bed"),
+    K27_I2    = file.path(new_liftover_dir, "Rep2_new_final.chromosomes.bed"),
+    K27_I3    = file.path(new_liftover_dir, "Rep3_new_final.chromosomes.bed"),
+    Consensus = file.path(new_liftover_dir, "Consensus_new_final.chromosomes.bed")
+)
+
+## Plot settings
+bin_size <- 1e6
+min_frac <- 0.5
+
+caps <- c(
+    K27_I1    = 60,
+    K27_I2    = 60,
+    K27_I3    = 60,
+    Consensus = 40
+)
+
+cols <- c(
+    K27_I1    = "#1f77b4",
+    K27_I2    = "#2ca02c",
+    K27_I3    = "#d95f02",
+    Consensus = "#7b3294"
+)
+
+## ---------------- 2. READ THE 44 CHROMOSOMES -------------------------
+
+fai <- read.table(
+    fai_f,
+    sep = "\t",
+    stringsAsFactors = FALSE
+)[, 1:2]
+
+colnames(fai) <- c("chr", "len")
+
+chroms <- paste0("NC_0915", 49:92, ".1")
+
+fai <- fai[match(chroms, fai$chr), ]
+stopifnot(!any(is.na(fai$len)))
+
+fai$label <- as.character(seq_len(nrow(fai)))
+
+cat("Chromosome total (Gb):", round(sum(fai$len) / 1e9, 3), "\n")
+
+## ---------------- 3. READ THE NEW LIFT-OVER BED FILES ----------------
+
+read_new_bed <- function(f) {
+    d <- read.table(
+        f,
+        sep = "\t",
+        quote = "",
+        comment.char = "",
+        header = FALSE,
+        fill = TRUE,
+        stringsAsFactors = FALSE
+    )
+    
+    d <- d[!grepl("^(track|browser|#)", d[[1]]), ]
+    
+    data.frame(
+        chr   = trimws(d[[1]]),
+        start = as.numeric(d[[2]]),
+        end   = as.numeric(d[[3]]),
+        id    = if (ncol(d) >= 4) as.character(d[[4]]) else paste0("peak_", seq_len(nrow(d))),
+        stringsAsFactors = FALSE
+    )
+}
+
+peaks <- list()
+peak_log <- list()
+
+for (nm in names(new_peaks)) {
+    
+    cat("Reading", nm, "\n")
+    
+    bed <- read_new_bed(new_peaks[[nm]])
+    
+    ## Keep only the 44 chromosomes
+    bed <- bed[bed$chr %in% chroms, ]
+    
+    peaks[[nm]] <- bed
+    
+    write.table(
+        bed,
+        file.path(out_dir, paste0(nm, "_chromosomes_only.bed")),
+        sep = "\t",
+        quote = FALSE,
+        row.names = FALSE,
+        col.names = FALSE
+    )
+    
+    peak_log[[nm]] <- data.frame(
+        set = nm,
+        peaks_on_44_chromosomes = nrow(bed)
+    )
+}
+
+peak_summary <- do.call(rbind, peak_log)
+print(peak_summary)
+
+write.table(
+    peak_summary,
+    file.path(out_dir, "figure4_peak_counts.tsv"),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+)
+
+## ---------------- 4. CALCULATE 1-Mb WINDOW DENSITY -------------------
+
+make_density <- function(bed) {
+    
+    bed <- bed[bed$chr %in% chroms, ]
+    
+    do.call(rbind, lapply(seq_len(nrow(fai)), function(i) {
+        
+        chr <- fai$chr[i]
+        len <- fai$len[i]
+        
+        n_bins <- ceiling(len / bin_size)
+        
+        bin_start <- (0:(n_bins - 1)) * bin_size
+        bin_end   <- pmin(bin_start + bin_size, len)
+        
+        peaks_chr <- bed[bed$chr == chr, ]
+        
+        if (nrow(peaks_chr) == 0) {
+            counts <- rep(0, n_bins)
+        } else {
+            midpoint <- floor((peaks_chr$start + peaks_chr$end) / 2 / bin_size) + 1
+            midpoint <- pmin(midpoint, n_bins)
+            counts <- tabulate(midpoint, nbins = n_bins)
+        }
+        
+        data.frame(
+            sector = fai$label[i],
+            start  = bin_start,
+            end    = bin_end,
+            value  = counts
+        )
+    }))
+}
+
+dens <- lapply(peaks, make_density)
+
+density_all <- do.call(
+    rbind,
+    lapply(names(dens), function(nm) {
+        cbind(set = nm, dens[[nm]])
+    })
+)
+
+write.table(
+    density_all,
+    file.path(out_dir, "density_1Mb_windows.tsv"),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+)
+
+## ---------------- 5. DRAW THE CIRCOS PLOT ----------------------------
+
+draw_circos <- function() {
+    
+    circos.clear()
+    
+    circos.par(
+        start.degree = 90,
+        clock.wise = TRUE,
+        gap.degree = 1.2,
+        cell.padding = c(0, 0, 0, 0),
+        track.margin = c(0.004, 0.004),
+        points.overflow.warning = FALSE
+    )
+    
+    circos.initialize(
+        factors = fai$label,
+        xlim = cbind(rep(0, nrow(fai)), fai$len)
+    )
+    
+    ## Chromosome track
+    circos.track(
+        ylim = c(0, 1),
+        track.height = 0.045,
+        bg.border = NA,
+        panel.fun = function(x, y) {
+            sn <- CELL_META$sector.index
+            
+            circos.rect(
+                CELL_META$xlim[1], 0,
+                CELL_META$xlim[2], 1,
+                col = if (as.integer(sn) %% 2 == 1) "#4d4d4d" else "#9a9a9a",
+                border = NA
+            )
+            
+            circos.text(
+                CELL_META$xcenter,
+                2.6,
+                sn,
+                facing = "inside",
+                niceFacing = TRUE,
+                cex = 0.6
+            )
+        }
+    )
+    
+    ## H3K27me3 density tracks
+    for (nm in c("K27_I1", "K27_I2", "K27_I3", "Consensus")) {
+        
+        local({
+            
+            d   <- dens[[nm]]
+            cap <- caps[[nm]]
+            col <- cols[[nm]]
+            
+            circos.track(
+                ylim = c(0, cap),
+                track.height = 0.105,
+                bg.col = "#f3f3f3",
+                bg.border = NA,
+                panel.fun = function(x, y) {
+                    
+                    dd <- d[d$sector == CELL_META$sector.index, ]
+                    
+                    circos.rect(
+                        dd$start,
+                        rep(0, nrow(dd)),
+                        dd$end,
+                        pmin(dd$value, cap),
+                        col = col,
+                        border = NA
+                    )
+                }
+            )
+        })
+    }
+    
+    circos.clear()
+    
+    text(0,  0.16, "H3K27me3", cex = 0.9)
+    text(0,  0.06, expression(italic("Penaeus vannamei")), cex = 0.9)
+    text(0, -0.04, "hemocytes", cex = 0.9)
+    text(0, -0.14, paste0(
+        "44 chromosomes (",
+        round(sum(fai$len) / 1e9, 2),
+        " Gb)"
+    ), cex = 0.9)
+    
+    legend(
+        "bottom",
+        ncol = 3,
+        bty = "n",
+        cex = 0.75,
+        xpd = NA,
+        inset = c(0, -0.04),
+        fill = c(cols, "#4d4d4d"),
+        legend = c(
+            "K27-I1 density",
+            "K27-I2 density",
+            "K27-I3 density",
+            "Consensus (3 of 3) density",
+            "Chromosomes (1-44, by size)"
+        )
+    )
+}
+
+## ---------------- 6. SAVE FIGURE -------------------------------------
+
+png(
+    file.path(out_dir, "Figure4_circos.png"),
+    width = 2400,
+    height = 2400,
+    res = 320
+)
+
+par(mar = c(4, 1, 1, 1))
+draw_circos()
+invisible(dev.off())
+
+pdf(
+    file.path(out_dir, "Figure4_circos.pdf"),
+    width = 7.5,
+    height = 7.5
+)
+
+par(mar = c(4, 1, 1, 1))
+draw_circos()
+invisible(dev.off())
+
+writeLines(
+    capture.output(sessionInfo()),
+    file.path(out_dir, "sessionInfo.txt")
+)
+
+cat("Done ->", out_dir, "\n")

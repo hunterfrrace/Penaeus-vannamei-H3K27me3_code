@@ -1,0 +1,304 @@
+# =============================================================================
+# COMPLETE FIGURE 4 — K27 REPLICATES
+# Using your exact Panel B reference-point code
+# =============================================================================
+
+library(data.table)
+library(ggplot2)
+library(patchwork)
+library(rtracklayer)
+library(ChIPseeker)
+library(GenomicFeatures)
+
+
+# =============================================================================
+# 1. Setup
+# =============================================================================
+
+FONT_FAMILY <- "Times New Roman"
+out_dir <- "D:/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2/Figure4_K27_Analysis"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+input_dir <- "D:/CHIP RESULT CONTROL K4 AND K27/ANNOCATION/MACS3_Broad_Results/MACS3_Overnight_Results_Rerun2"
+
+K27_FILES <- c(
+    "k27-I1" = file.path(input_dir, "K27_Rep1_Clean_peaks.broadPeak"),
+    "k27-I2" = file.path(input_dir, "K27_Rep2_Clean_peaks.broadPeak"),
+    "k27-I3" = file.path(input_dir, "K27_Rep3_Clean_peaks.broadPeak")
+)
+
+GTF_FILE <- "D:/genomes/Pvannamei/GCF_003789085.1_ASM378908v1_genomic.gtf"
+
+
+# =============================================================================
+# 2. Load peaks
+# =============================================================================
+
+K27_PEAKS <- lapply(K27_FILES, function(f) {
+    rtracklayer::import.bed(con = f, extraCols = c(signalValue = "numeric", pValue = "numeric", qValue = "numeric"))
+})
+names(K27_PEAKS) <- names(K27_FILES)
+
+
+# =============================================================================
+# 3. Build TxDb
+# =============================================================================
+
+txdb <- makeTxDbFromGFF(file = GTF_FILE, format = "gtf", organism = "Penaeus vannamei")
+
+
+# =============================================================================# PANEL B - Calculate TSS profile
+promoters <- ChIPseeker::getPromoters(TxDb = txdb, upstream = 10000, downstream = 10000)
+
+calculate_tss_profile <- function(peaks_gr, sample_name) {
+    tag_matrix <- ChIPseeker::getTagMatrix(peaks_gr, windows = promoters)
+    
+    # It's a matrix, not a list!
+    n_pos <- ncol(tag_matrix)
+    x_positions <- seq(-10000, 10000, length.out = n_pos)
+    mean_coverage <- colMeans(tag_matrix, na.rm = TRUE)
+    lower_ci <- apply(tag_matrix, 2, function(col) quantile(col, 0.025, na.rm = TRUE))
+    upper_ci <- apply(tag_matrix, 2, function(col) quantile(col, 0.975, na.rm = TRUE))
+    
+    data.table(
+        Position = x_positions,
+        Mean_Coverage = mean_coverage,
+        Lower = as.numeric(lower_ci),
+        Upper = as.numeric(upper_ci),
+        Sample = sample_name
+    )
+}
+
+panel_b_data <- rbindlist(
+    lapply(names(K27_PEAKS), function(sample) {
+        calculate_tss_profile(K27_PEAKS[[sample]], sample)
+    })
+)
+
+cat("Panel B data created:\n")
+print(nrow(panel_b_data))
+print(head(panel_b_data))
+
+# =============================================================================
+# 5. PANEL B - Plot (YOUR EXACT CODE)
+# =============================================================================
+
+panel_b_colors <- c(
+    "k27-I1" = "#D98C8C",
+    "k27-I2" = "#59B77A",
+    "k27-I3" = "#7FA6D8"
+)
+
+panel_b_data$Sample <- factor(panel_b_data$Sample, levels = c("k27-I1", "k27-I2", "k27-I3"))
+
+panel_b_data <- panel_b_data[
+    is.finite(Position) &
+    is.finite(Mean_Coverage) &
+    is.finite(Lower) &
+    is.finite(Upper)
+]
+
+panel_b_data <- panel_b_data[
+    Position >= -10000 &
+    Position <= 10000
+]
+
+p_b_reference_point <- ggplot(
+    panel_b_data,
+    aes(
+        x = Position,
+        y = Mean_Coverage,
+        color = Sample,
+        fill = Sample,
+        group = Sample
+    )
+) +
+    geom_ribbon(aes(ymin = Lower, ymax = Upper), alpha = 0.20, color = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+    facet_grid(Sample ~ ., scales = "free_y", switch = "y") +
+    scale_color_manual(values = panel_b_colors, guide = "none") +
+    scale_fill_manual(values = panel_b_colors, guide = "none") +
+    scale_x_continuous(
+        breaks = c(-10000, -5000, 0, 5000, 10000),
+        labels = c("-10kb", "-5kb", "TSS", "5kb", "10kb"),
+        limits = c(-10000, 10000),
+        expand = c(0, 0)
+    ) +
+    labs(
+        x = "Genomic Region (5'-3')",
+        y = "Peak Count Frequency",
+        title = "H3K27me3 broad-domain enrichment"
+    ) +
+    theme_classic(base_size = 12, base_family = FONT_FAMILY) +
+    theme(
+        plot.title = element_text(size = 12, face = "bold", family = FONT_FAMILY, hjust = 0.5),
+        axis.title = element_text(size = 12, family = FONT_FAMILY),
+        axis.text.x = element_text(size = 12, family = FONT_FAMILY, color = "black"),
+        axis.text.y = element_text(size = 12, family = FONT_FAMILY, color = "black"),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+        panel.grid.major = element_line(color = "grey85", linewidth = 0.30),
+        panel.grid.minor = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_rect(color = "black", fill = "white", linewidth = 0.8),
+        strip.text.y.left = element_text(angle = 0, size = 12, face = "bold", family = FONT_FAMILY),
+        panel.spacing.y = grid::unit(0.15, "lines"),
+        plot.margin = margin(8, 8, 8, 8)
+    )
+
+ggsave(filename = file.path(out_dir, "PanelB_H3K27me3_ReferencePoint_TSS.pdf"),
+       plot = p_b_reference_point, width = 7, height = 7, units = "in", device = cairo_pdf, bg = "white", limitsize = FALSE)
+
+ggsave(filename = file.path(out_dir, "PanelB_H3K27me3_ReferencePoint_TSS.png"),
+       plot = p_b_reference_point, width = 7, height = 7, units = "in", dpi = 300, bg = "white", limitsize = FALSE)
+
+print(p_b_reference_point)
+
+
+# =============================================================================
+# 6. PANEL A - Genomic annotation
+# =============================================================================
+
+feature_levels <- c("Promoter (<=1kb)", "Promoter (1-2kb)", "Promoter (2-3kb)", "5' UTR", "3' UTR",
+                   "1st Exon", "Other Exon", "1st Intron", "Other Intron", "Downstream (<=300bp)",
+                   "Distal Intergenic", "Other")
+
+feature_colors <- c("Promoter (<=1kb)" = "#FFFFB2", "Promoter (1-2kb)" = "#54278F",
+                   "Promoter (2-3kb)" = "#807DBA", "5' UTR" = "#FDB863", "3' UTR" = "#E6550D",
+                   "1st Exon" = "#31A354", "Other Exon" = "#78C679", "1st Intron" = "#F1B6DA",
+                   "Other Intron" = "#DE77AE", "Downstream (<=300bp)" = "#3182BD",
+                   "Distal Intergenic" = "#9ECAE1", "Other" = "#BDBDBD")
+
+annotate_peaks <- function(peaks_gr, sample_name) {
+    peak_annotation <- ChIPseeker::annotatePeak(peak = peaks_gr, tssRegion = c(-3000, 3000), TxDb = txdb,
+                                               level = "transcript", assignGenomicAnnotation = TRUE, verbose = FALSE)
+    annotation_dt <- as.data.table(as.data.frame(peak_annotation))
+    annotation_dt[, simple_annotation := {
+        ann <- as.character(annotation)
+        ifelse(grepl("Promoter \\(<=1kb\\)", ann), "Promoter (<=1kb)",
+        ifelse(grepl("Promoter \\(1-2kb\\)", ann), "Promoter (1-2kb)",
+        ifelse(grepl("Promoter \\(2-3kb\\)", ann), "Promoter (2-3kb)",
+        ifelse(grepl("5' UTR", ann), "5' UTR",
+        ifelse(grepl("3' UTR", ann), "3' UTR",
+        ifelse(grepl("1st Exon", ann), "1st Exon",
+        ifelse(grepl("Exon", ann), "Other Exon",
+        ifelse(grepl("1st Intron", ann), "1st Intron",
+        ifelse(grepl("Intron", ann), "Other Intron",
+        ifelse(grepl("Downstream", ann), "Downstream (<=300bp)",
+        ifelse(grepl("Distal Intergenic", ann), "Distal Intergenic", "Other")))))))))))
+    }]
+    annotation_dt[, Sample := sample_name]
+    annotation_dt
+}
+
+annotation_list <- lapply(names(K27_PEAKS), function(sample) annotate_peaks(K27_PEAKS[[sample]], sample))
+names(annotation_list) <- names(K27_PEAKS)
+
+panel_a_data <- rbindlist(lapply(names(annotation_list), function(sample) {
+    dt <- annotation_list[[sample]]
+    total <- nrow(dt)
+    counts <- dt[, .N, by = simple_annotation]
+    complete <- data.table(simple_annotation = feature_levels)
+    complete <- merge(complete, counts, by = "simple_annotation", all.x = TRUE)
+    complete[is.na(N), N := 0L]
+    complete[, pct := round(100 * N / total, 1)]
+    complete[, Sample := sample]
+    complete[, simple_annotation := factor(simple_annotation, levels = feature_levels)]
+    complete
+}))
+
+p_a <- ggplot(panel_a_data, aes(x = Sample, y = pct, fill = simple_annotation)) +
+    geom_col(width = 0.72, color = "grey25", linewidth = 0.25) +
+    coord_flip() +
+    scale_x_discrete(limits = c("k27-I3", "k27-I2", "k27-I1"), drop = FALSE) +
+    scale_fill_manual(values = feature_colors, limits = feature_levels, breaks = feature_levels, drop = FALSE, name = "Feature") +
+    scale_y_continuous(breaks = seq(0, 100, by = 25), expand = expansion(mult = c(0, 0.02))) +
+    labs(x = NULL, y = "Percentage (%)", title = "a   Genomic distribution: H3K27me3") +
+    theme_bw(base_family = FONT_FAMILY, base_size = 20) +
+    theme(text = element_text(family = FONT_FAMILY, color = "black"),
+          plot.title = element_text(family = FONT_FAMILY, face = "bold", size = 25),
+          axis.title = element_text(family = FONT_FAMILY, size = 21),
+          axis.text = element_text(family = FONT_FAMILY, size = 18),
+          legend.title = element_text(family = FONT_FAMILY, face = "bold", size = 20),
+          legend.text = element_text(family = FONT_FAMILY, size = 18),
+          strip.background = element_blank(), panel.grid.minor = element_blank(),
+          panel.border = element_blank(), axis.line = element_line(color = "black", linewidth = 0.55))
+
+
+# =============================================================================
+# 7. PANEL C - TSS distance
+# =============================================================================
+
+bin_levels <- c(">100 kb", "10-100 kb", "5-10 kb", "3-5 kb", "1-3 kb", "0 bp-1 kb")
+bin_colors <- c(">100 kb" = "#CAB2D6", "10-100 kb" = "#33A02C", "5-10 kb" = "#B2DF8A",
+               "3-5 kb" = "#FEC44F", "1-3 kb" = "#3182BD", "0 bp-1 kb" = "#9ECAE1")
+
+panel_c_data <- rbindlist(lapply(names(annotation_list), function(sample) {
+    dt <- annotation_list[[sample]][!is.na(distanceToTSS)]
+    dt[, side := fifelse(distanceToTSS < 0, "5prime", "3prime")]
+    dt[, absolute_distance := abs(distanceToTSS)]
+    dt[, bin_label := cut(absolute_distance, breaks = c(-Inf, 1000, 3000, 5000, 10000, 100000, Inf),
+                         labels = c("0 bp-1 kb", "1-3 kb", "3-5 kb", "5-10 kb", "10-100 kb", ">100 kb"), include.lowest = TRUE)]
+    side_totals <- dt[, .(side_total = .N), by = side]
+    counts <- dt[, .N, by = .(side, bin_label)]
+    counts <- merge(counts, side_totals, by = "side", all.x = TRUE)
+    counts[, pct := 100 * N / side_total]
+    counts[, signed_pct := fifelse(side == "5prime", -pct, pct)]
+    counts[, Sample := sample]
+    counts[, bin_label := factor(bin_label, levels = bin_levels)]
+    counts
+}))
+
+max_extent <- panel_c_data[, .(side_extent = sum(pct)), by = .(Sample, side)][, max(side_extent)]
+axis_limit <- ceiling(max_extent / 10) * 10
+
+p_c <- ggplot(panel_c_data, aes(x = Sample, y = signed_pct, fill = bin_label)) +
+    geom_col(width = 0.72, color = "grey25", linewidth = 0.25) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.9) +
+    coord_flip() +
+    scale_x_discrete(limits = c("k27-I3", "k27-I2", "k27-I1"), drop = FALSE) +
+    scale_fill_manual(values = bin_colors, limits = bin_levels, breaks = bin_levels, drop = FALSE, name = "Distance from TSS") +
+    scale_y_continuous(breaks = seq(-axis_limit, axis_limit, by = 10), labels = function(x) abs(x), expand = expansion(mult = c(0, 0.02))) +
+    labs(x = NULL, y = "Binding sites (%) (5'-3')", title = "c   H3K27me3 TSS proximity") +
+    theme_bw(base_family = FONT_FAMILY, base_size = 20) +
+    theme(text = element_text(family = FONT_FAMILY, color = "black"),
+          plot.title = element_text(family = FONT_FAMILY, face = "bold", size = 25),
+          axis.title = element_text(family = FONT_FAMILY, size = 21),
+          axis.text = element_text(family = FONT_FAMILY, size = 18),
+          legend.title = element_text(family = FONT_FAMILY, face = "bold", size = 20),
+          legend.text = element_text(family = FONT_FAMILY, size = 18),
+          strip.background = element_blank(), panel.grid.minor = element_blank(),
+          panel.border = element_blank(), axis.line = element_line(color = "black", linewidth = 0.55))
+
+
+# =============================================================================
+# 8. Assemble Figure 4
+# =============================================================================
+
+figure4 <- (p_a + p_b_reference_point + p_c +
+    plot_layout(design = "
+          AB
+          CB
+        ", widths = c(1.00, 1.28), heights = c(1.00, 1.00)))
+
+ggsave(filename = file.path(out_dir, "Figure4_K27_ALL.png"),
+       plot = figure4, width = 20, height = 13, units = "in", dpi = 600, bg = "white")
+
+ggsave(filename = file.path(out_dir, "Figure4_K27_ALL.pdf"),
+       plot = figure4, width = 20, height = 13, units = "in", device = cairo_pdf, bg = "white")
+
+
+# =============================================================================
+# 9. Final summary
+# =============================================================================
+
+cat("\n============================================================\n")
+cat("FIGURE 4 COMPLETE\n")
+cat("============================================================\n\n")
+cat("Output directory:\n")
+cat(out_dir, "\n\n")
+cat("Files created:\n")
+cat("  - Figure4_K27_ALL.png\n")
+cat("  - Figure4_K27_ALL.pdf\n")
+cat("  - PanelB_H3K27me3_ReferencePoint_TSS.pdf\n")
+cat("  - PanelB_H3K27me3_ReferencePoint_TSS.png\n")
